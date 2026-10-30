@@ -121,6 +121,10 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Auch DROP TABLE braucht eine exklusive Sperre: nicht endlos warten
+    -- (sonst stauen sich die Inserts des Connectors dahinter).
+    PERFORM set_config('lock_timeout', '10s', true);
+
     IF raw_retention IS NOT NULL THEN
         IF raw_retention < interval '1 day' THEN
             RAISE EXCEPTION 'opairs: raw_retention muss mindestens 1 Tag sein (%)', raw_retention;
