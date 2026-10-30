@@ -1,0 +1,76 @@
+# OPAIRS Connect: Connector + Postgres + Wartungsjob
+#
+#   cp .env.example .env     (Passwoerter anpassen, URL-sichere Zeichen verwenden)
+#   docker compose up -d --build
+#
+# Standardmaessig laeuft die Selbsttest-Pipeline. Fuer echte Maschinen in .env
+# PIPELINE auf eine Datei aus ./pipelines setzen.
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-opairs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD fehlt (.env)}
+      POSTGRES_DB: ${POSTGRES_DB:-opairs}
+      OPAIRS_WRITER_PASSWORD: ${OPAIRS_WRITER_PASSWORD:?OPAIRS_WRITER_PASSWORD fehlt (.env)}
+      OPAIRS_READER_PASSWORD: ${OPAIRS_READER_PASSWORD:?OPAIRS_READER_PASSWORD fehlt (.env)}
+    volumes:
+      - opairs-pgdata:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # Fuer Superset von ausserhalb des Hosts: Port freigeben (nur bei Bedarf,
+    # und dann moeglichst nur im internen Netz / mit TLS):
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  connector:
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgres://opairs_writer:${OPAIRS_WRITER_PASSWORD}@db:5432/${POSTGRES_DB:-opairs}?sslmode=disable
+      MACHINE_NAME: ${MACHINE_NAME:-machine-01}
+      OPCUA_ENDPOINT: ${OPCUA_ENDPOINT:-opc.tcp://host.docker.internal:4840}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./pipelines:/etc/opairs/pipelines:ro
+    command: ["-c", "${PIPELINE:-/etc/opairs/pipelines/selftest.yaml}"]
+    # Benthos-Status: http://<host>:4195/ready (Port bei Bedarf freigeben)
+
+  # Alle 5 Minuten: Partitionen im Voraus anlegen, alte Rohdaten loeschen, Minutenwerte berechnen.
+  maintenance:
+    image: postgres:17
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-opairs}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-opairs}
+      RAW_RETENTION_DAYS: ${RAW_RETENTION_DAYS:-30}
+      AGG_RETENTION_DAYS: ${AGG_RETENTION_DAYS:-400}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          psql -v ON_ERROR_STOP=1 -c "SELECT opairs.run_maintenance(raw_retention_days => $${RAW_RETENTION_DAYS}, agg_retention_days => $${AGG_RETENTION_DAYS})" \
+            || echo "Wartung fehlgeschlagen, naechster Versuch in 5 Minuten"
+          sleep 300
+        done
+
+volumes:
+  opairs-pgdata:

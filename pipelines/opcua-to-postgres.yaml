@@ -1,0 +1,53 @@
+# OPC UA -> Postgres
+# Liest Knoten eines OPC-UA-Servers und schreibt sie in opairs.machine_data.
+#
+# Anpassen:
+#   - nodeIDs: die Knoten, die gelesen werden sollen (mehrere moeglich)
+#   - Umgebungsvariablen: OPCUA_ENDPOINT, MACHINE_NAME (siehe .env.example)
+#   - Zugangsdaten / Sicherheit: siehe docs/input/opc-ua-input.md
+#
+# Starten:  PIPELINE=/etc/opairs/pipelines/opcua-to-postgres.yaml docker compose up -d
+
+input:
+  opcua:
+    endpoint: '${OPCUA_ENDPOINT:opc.tcp://localhost:4840}'
+    nodeIDs:
+      - 'ns=2;s=IoTSensors'
+    subscribeEnabled: true
+    # username: 'user'
+    # password: 'secret'
+    # securityMode: SignAndEncrypt
+
+pipeline:
+  processors:
+    - mapping: |
+        # Quellzeitstempel des Servers; fehlt er oder ist er 0001-01-01, gilt "jetzt".
+        let src_ts = meta("opcua_source_timestamp").or("")
+        root.ts = if $src_ts == "" || $src_ts.has_prefix("0001") { now() } else { $src_ts }
+        root.machine = env("MACHINE_NAME").or("unknown")
+        root.tag = meta("opcua_tag_name").or("unknown")
+        root.quality = meta("opcua_attr_statuscode")
+
+        # Zahlen und Bool nach value (Bool als 1/0), alles andere als Text.
+        root.value = match this.type() {
+          "number" => this,
+          "bool" => if this { 1 } else { 0 },
+          _ => null,
+        }
+        root.value_text = match this.type() {
+          "number" => null,
+          "bool" => null,
+          "string" => this,
+          _ => this.string(),
+        }
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s

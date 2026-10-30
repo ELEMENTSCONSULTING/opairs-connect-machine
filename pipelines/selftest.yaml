@@ -1,0 +1,33 @@
+# Selbsttest ohne Maschine: erzeugt Testwerte und schreibt sie in Postgres.
+# Damit laesst sich der ganze Stack (Connector -> Postgres -> Superset)
+# pruefen, bevor eine echte Quelle angebunden wird.
+#
+# Starten:  PIPELINE=/etc/opairs/pipelines/selftest.yaml docker compose up -d
+
+input:
+  generate:
+    interval: 500ms
+    mapping: |
+      root = random_int() % 1000 / 10.0
+      meta tag = ["temperature", "pressure", "speed"].index(random_int() % 3)
+
+pipeline:
+  processors:
+    - mapping: |
+        root.ts = now()
+        root.machine = env("MACHINE_NAME").or("selftest")
+        root.tag = meta("tag")
+        root.value = this
+        root.value_text = null
+        root.quality = "Good"
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 100
+      period: 1s

@@ -1,20 +1,83 @@
-# benthos-umh
+# opairs-connect-machine
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![GitHub Actions](https://github.com/united-manufacturing-hub/benthos-umh/workflows/main/badge.svg)](https://github.com/united-manufacturing-hub/benthos-umh/actions)
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Funited-manufacturing-hub%2Fbenthos-umh.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Funited-manufacturing-hub%2Fbenthos-umh?ref=badge_shield)
+Connector-Stack fuer Maschinendaten: liest OT-Quellen (OPC UA, Siemens S7,
+Modbus, EtherNet/IP, ...) und schreibt sie in eine PostgreSQL-Datenbank, aus
+der Superset liest.
 
-You can find the documentation under [docs](https://docs.umh.app/benthos-umh)
+Basis ist **benthos-umh** (Apache-2.0, UMH Systems GmbH), siehe
+[`UPSTREAM.md`](UPSTREAM.md). Das urspruengliche README steht in
+[`README.upstream.md`](README.upstream.md), die Doku der Plugins unter
+[`docs/`](docs/).
 
-## License
+```
+Maschinen --> connector (benthos-umh) --> Postgres --> Superset
+                  ^                           ^
+            ./pipelines (YAML)          maintenance (alle 5 Min)
+```
 
-All source code is distributed under the APACHE LICENSE, VERSION 2.0. See LICENSE for more information.
+## Schnellstart
 
-[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Funited-manufacturing-hub%2Fbenthos-umh.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Funited-manufacturing-hub%2Fbenthos-umh?ref=badge_large)
+```bash
+cp .env.example .env        # Passwoerter anpassen (URL-sichere Zeichen)
+docker compose up -d --build
+```
 
+Standardmaessig laeuft die **Selbsttest-Pipeline** (`pipelines/selftest.yaml`),
+die Testwerte erzeugt. Damit laesst sich der Stack pruefen, bevor eine echte
+Quelle angebunden wird:
 
-## Contact
+```bash
+./scripts/smoke-test.sh
+```
 
-Feel free to provide us feedback on our [Discord channel](https://discord.gg/F9mqkZnm9d).
+Echte Quelle anbinden: in `.env` die Variable `PIPELINE` auf eine Datei aus
+`pipelines/` setzen (z. B. `/etc/opairs/pipelines/opcua-to-postgres.yaml`) und
+die Knoten (`nodeIDs`) in der Datei anpassen. Weitere Protokolle: siehe
+`docs/input/` (S7, Modbus, EtherNet/IP, ifm IO-Link, Beckhoff ADS, Sparkplug B).
 
-For more information about the United Manufacturing Hub, visit [UMH Systems GmbH](https://www.umh.app). If you haven't worked with the United Manufacturing Hub before, [give it a try](https://management.umh.app)! Setting it up takes only a matter of minutes.
+## Datenmodell (reines PostgreSQL, ohne Erweiterungen)
+
+| Objekt | Zweck |
+|---|---|
+| `opairs.machine_data` | Rohdaten, schmal (`ts, machine, tag, value, value_text, quality`), **taeglich partitioniert** |
+| `opairs.machine_data_default` | Sicherheitsnetz, falls eine Tagespartition fehlt |
+| `opairs.machine_data_1min` | Minutenwerte (avg/min/max/Anzahl) fuer Dashboards |
+| `opairs.run_maintenance()` | legt Partitionen an, loescht alte Rohdaten, berechnet Minutenwerte |
+
+Der Container `maintenance` ruft `run_maintenance()` alle 5 Minuten auf.
+Aufbewahrung ueber `RAW_RETENTION_DAYS` (Standard 30) und `AGG_RETENTION_DAYS`
+(Standard 400). Die Rohdaten-Aufbewahrung muss laenger sein als das
+Aggregations-Fenster (2 Stunden).
+
+Es gibt bewusst **keine Kompression und keine Continuous Aggregates**
+(TimescaleDB-Community-Funktionen stehen unter der Timescale License). Rohdaten
+kurz, Aggregate lang aufbewahren.
+
+## Superset
+
+Datenquelle als PostgreSQL anlegen, Benutzer `opairs_reader` (nur lesend),
+Schema `opairs`. Fuer Dashboards die Tabelle `machine_data_1min` verwenden,
+nicht die Rohdaten. Dazu in `compose.yaml` den Datenbank-Port freigeben
+(auskommentierter Block), moeglichst nur im internen Netz und mit TLS.
+
+## Rollen
+
+- `opairs_writer`: Connector, darf nur in `opairs.machine_data` einfuegen
+- `opairs_reader`: Superset, darf nur lesen
+- Admin-Benutzer (`POSTGRES_USER`): Setup und Wartung
+
+## Lizenzen
+
+Siehe [`LICENSE`](LICENSE), [`NOTICE`](NOTICE) und
+[`THIRD_PARTY.md`](THIRD_PARTY.md). Achtung: Die Sparkplug-Protobuf-Datei
+steht unter EPL-2.0, nicht unter Apache-2.0.
+
+## Stand / bekannte Grenzen
+
+- Die Benthos-Pipelines (`pipelines/*.yaml`) und das Dockerfile wurden
+  **noch nicht gebaut oder ausgefuehrt**. Das SQL und die Rollen sind gegen
+  PostgreSQL 16 getestet. Zuerst `./scripts/smoke-test.sh` ausfuehren.
+- Der Connector-Container hat keinen Healthcheck (`scratch`-Image ohne Shell).
+  `restart: unless-stopped` startet ihn bei Absturz neu; der Status ist unter
+  `:4195/ready` abrufbar.
+- ERP-Anbindungen (SAP, Infor, proALPHA) sind nicht enthalten.
