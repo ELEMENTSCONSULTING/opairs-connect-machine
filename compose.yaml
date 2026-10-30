@@ -6,10 +6,18 @@
 # Standardmaessig laeuft die Selbsttest-Pipeline. Fuer echte Maschinen in .env
 # PIPELINE auf eine Datei aus ./pipelines setzen.
 
+# Log-Rotation fuer alle Dienste (sonst laufen On-Prem-Platten voll)
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:17
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-opairs}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD fehlt (.env)}
@@ -20,21 +28,25 @@ services:
       - opairs-pgdata:/var/lib/postgresql/data
       - ./sql:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      # -h 127.0.0.1 erzwingt TCP: waehrend der Erstinitialisierung lauscht
+      # Postgres nur auf dem Socket, so gilt die DB erst danach als bereit.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
-      retries: 20
+      retries: 30
     # Fuer Superset von ausserhalb des Hosts: Port freigeben (nur bei Bedarf,
     # und dann moeglichst nur im internen Netz / mit TLS):
     # ports:
     #   - "127.0.0.1:5432:5432"
 
   connector:
+    image: opairs-connect-machine:${APP_VERSION:-dev}
     build:
       context: .
       args:
         APP_VERSION: ${APP_VERSION:-dev}
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
@@ -49,10 +61,12 @@ services:
     command: ["-c", "${PIPELINE:-/etc/opairs/pipelines/selftest.yaml}"]
     # Benthos-Status: http://<host>:4195/ready (Port bei Bedarf freigeben)
 
-  # Alle 5 Minuten: Partitionen im Voraus anlegen, alte Rohdaten loeschen, Minutenwerte berechnen.
+  # Beim Start: Schema anwenden (Updates). Danach alle 5 Minuten: Partitionen im
+  # Voraus anlegen, alte Rohdaten loeschen, Minutenwerte berechnen.
   maintenance:
     image: postgres:17
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
@@ -61,14 +75,22 @@ services:
       PGUSER: ${POSTGRES_USER:-opairs}
       PGPASSWORD: ${POSTGRES_PASSWORD}
       PGDATABASE: ${POSTGRES_DB:-opairs}
+      PGOPTIONS: "-c client_min_messages=warning"
       RAW_RETENTION_DAYS: ${RAW_RETENTION_DAYS:-30}
       AGG_RETENTION_DAYS: ${AGG_RETENTION_DAYS:-400}
+    volumes:
+      - ./sql:/opt/opairs/sql:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        until psql -q -v ON_ERROR_STOP=1 -f /opt/opairs/sql/001_schema.sql >/dev/null; do
+          echo "opairs: Schema konnte nicht angewendet werden, neuer Versuch in 10 s"
+          sleep 10
+        done
+        echo "opairs: Schema aktuell, Wartung startet"
         while true; do
-          psql -v ON_ERROR_STOP=1 -c "SELECT opairs.run_maintenance(raw_retention_days => $${RAW_RETENTION_DAYS}, agg_retention_days => $${AGG_RETENTION_DAYS})" \
-            || echo "Wartung fehlgeschlagen, naechster Versuch in 5 Minuten"
+          psql -q -v ON_ERROR_STOP=1 -c "SELECT opairs.run_maintenance(raw_retention_days => $${RAW_RETENTION_DAYS}, agg_retention_days => $${AGG_RETENTION_DAYS})" >/dev/null \
+            || echo "opairs: Wartung fehlgeschlagen, naechster Versuch in 5 Minuten"
           sleep 300
         done
 

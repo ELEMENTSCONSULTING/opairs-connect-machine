@@ -1,7 +1,13 @@
 -- OPAIRS Connect: Schema fuer Maschinendaten
 -- Reines PostgreSQL (keine Erweiterungen, insbesondere kein TimescaleDB).
--- Wird beim ersten Start der Datenbank automatisch ausgefuehrt
--- (Postgres-Image: /docker-entrypoint-initdb.d).
+--
+-- Wird ausgefuehrt
+--   1) beim ersten Start der Datenbank (Postgres-Image: /docker-entrypoint-initdb.d)
+--   2) bei jedem Start des Wartungs-Containers (Schema-Updates).
+-- Die Datei muss deshalb idempotent bleiben (IF NOT EXISTS / OR REPLACE).
+-- Achtung: Aendert sich die Parameterliste einer Funktion, vorher
+-- DROP FUNCTION IF EXISTS ... mit der alten Signatur ergaenzen, sonst
+-- entstehen zwei Varianten und Aufrufe werden mehrdeutig.
 
 CREATE SCHEMA IF NOT EXISTS opairs;
 
@@ -23,8 +29,14 @@ CREATE TABLE IF NOT EXISTS opairs.machine_data (
 CREATE TABLE IF NOT EXISTS opairs.machine_data_default
     PARTITION OF opairs.machine_data DEFAULT;
 
+-- Abfragen je Maschine/Tag (Superset-Filter, Detailansichten)
 CREATE INDEX IF NOT EXISTS machine_data_machine_tag_ts_idx
     ON opairs.machine_data (machine, tag, ts DESC);
+
+-- Zeitbereichs-Abfragen ueber alle Tags (z. B. Aggregation). BRIN ist fuer
+-- zeitlich aufsteigend geschriebene Daten sehr klein und billig.
+CREATE INDEX IF NOT EXISTS machine_data_ts_brin_idx
+    ON opairs.machine_data USING brin (ts);
 
 -- Aggregat fuer Dashboards (Minutenwerte), laenger aufbewahrt als Rohdaten.
 CREATE TABLE IF NOT EXISTS opairs.machine_data_1min (
@@ -37,6 +49,10 @@ CREATE TABLE IF NOT EXISTS opairs.machine_data_1min (
     sample_count bigint           NOT NULL,
     PRIMARY KEY (machine, tag, bucket)
 );
+
+-- Zeitfilter in Superset, Aufbewahrung und Ermittlung des letzten Buckets
+CREATE INDEX IF NOT EXISTS machine_data_1min_bucket_idx
+    ON opairs.machine_data_1min (bucket);
 
 -- Partitionen im Voraus anlegen und alte Rohdaten-Partitionen loeschen.
 CREATE OR REPLACE FUNCTION opairs.maintain_partitions(
@@ -54,6 +70,12 @@ DECLARE
     hi        timestamptz;
     r         record;
 BEGIN
+    -- Nur eine Wartung gleichzeitig (Sperre gilt bis Transaktionsende).
+    IF NOT pg_try_advisory_xact_lock(hashtext('opairs.maintenance')) THEN
+        RAISE NOTICE 'opairs: Wartung laeuft bereits, uebersprungen';
+        RETURN;
+    END IF;
+
     -- 1) Partitionen fuer gestern bis heute + ahead_days anlegen.
     FOR i IN -1..ahead_days LOOP
         d := today + i;
@@ -106,22 +128,40 @@ BEGIN
 END;
 $$;
 
--- Minutenwerte aus den Rohdaten (idempotent, ueberschreibt die letzten
--- lookback Minuten). Voraussetzung: Rohdaten-Aufbewahrung > lookback.
+-- Minutenwerte aus den Rohdaten (idempotent).
+-- Berechnet mindestens die letzten `lookback` Minuten neu (spaet eintreffende
+-- Werte). War die Wartung laenger ausgefallen, wird ab dem letzten
+-- vorhandenen Bucket aufgeholt, hoechstens jedoch `max_catchup` zurueck.
+-- Werte mit Zeitstempel in der Zukunft (falsche Uhr an der Quelle) werden
+-- ignoriert. Voraussetzung: Rohdaten-Aufbewahrung > lookback.
 CREATE OR REPLACE FUNCTION opairs.aggregate_1min(
-    lookback interval DEFAULT interval '2 hours'
+    lookback    interval DEFAULT interval '2 hours',
+    max_catchup interval DEFAULT interval '7 days'
 ) RETURNS bigint
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    n bigint;
+    n           bigint;
+    start_ts    timestamptz := date_trunc('minute', now() - lookback);
+    end_ts      timestamptz := date_trunc('minute', now()) + interval '1 minute';
+    last_bucket timestamptz;
 BEGIN
+    SELECT max(bucket) INTO last_bucket
+      FROM opairs.machine_data_1min
+     WHERE bucket < end_ts;
+
+    IF last_bucket IS NOT NULL AND last_bucket < start_ts THEN
+        start_ts := last_bucket;
+    END IF;
+    start_ts := greatest(start_ts, date_trunc('minute', now() - max_catchup));
+
     INSERT INTO opairs.machine_data_1min
            (bucket, machine, tag, avg_value, min_value, max_value, sample_count)
     SELECT date_trunc('minute', ts), machine, tag,
            avg(value), min(value), max(value), count(*)
       FROM opairs.machine_data
-     WHERE ts >= date_trunc('minute', now() - lookback)
+     WHERE ts >= start_ts
+       AND ts <  end_ts
        AND value IS NOT NULL
      GROUP BY 1, 2, 3
     ON CONFLICT (machine, tag, bucket) DO UPDATE
@@ -144,12 +184,31 @@ CREATE OR REPLACE FUNCTION opairs.run_maintenance(
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    -- Nur eine Wartung gleichzeitig (gleiche Sperre wie in maintain_partitions).
+    IF NOT pg_try_advisory_xact_lock(hashtext('opairs.maintenance')) THEN
+        RAISE NOTICE 'opairs: Wartung laeuft bereits, uebersprungen';
+        RETURN;
+    END IF;
+
+    IF raw_retention_days * 24 * 60 <= agg_lookback_minutes THEN
+        RAISE EXCEPTION 'opairs: raw_retention_days (%) muss laenger sein als agg_lookback_minutes (%)',
+            raw_retention_days, agg_lookback_minutes;
+    END IF;
+
     PERFORM opairs.maintain_partitions(ahead_days, make_interval(days => raw_retention_days));
     PERFORM opairs.aggregate_1min(make_interval(mins => agg_lookback_minutes));
     DELETE FROM opairs.machine_data_1min
      WHERE bucket < now() - make_interval(days => agg_retention_days);
 END;
 $$;
+
+-- Fuer Superset: letzter Minutenwert je Maschine und Tag (letzte 24 Stunden).
+CREATE OR REPLACE VIEW opairs.v_latest_1min AS
+SELECT DISTINCT ON (machine, tag)
+       machine, tag, bucket, avg_value, min_value, max_value, sample_count
+  FROM opairs.machine_data_1min
+ WHERE bucket > now() - interval '24 hours'
+ ORDER BY machine, tag, bucket DESC;
 
 -- Erste Partitionen sofort anlegen, damit der Connector ab dem Start schreiben kann.
 SELECT opairs.maintain_partitions();
