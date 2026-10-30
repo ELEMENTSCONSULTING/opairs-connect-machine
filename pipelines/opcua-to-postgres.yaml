@@ -29,17 +29,12 @@ pipeline:
         root.quality = meta("opcua_attr_statuscode")
 
         # Zahlen und Bool nach value (Bool als 1/0), alles andere als Text.
-        root.value = match this.type() {
-          "number" => this,
-          "bool" => if this { 1 } else { 0 },
-          _ => null,
-        }
-        root.value_text = match this.type() {
-          "number" => null,
-          "bool" => null,
-          "string" => this,
-          _ => this.string(),
-        }
+        # Hinweis: kein match-Block verwenden, dort zeigt `this` auf den
+        # geprueften Ausdruck statt auf den Messwert.
+        let v = this
+        let t = $v.type()
+        root.value = if $t == "number" { $v } else if $t == "bool" { if $v { 1 } else { 0 } } else { null }
+        root.value_text = if $t == "string" { $v } else if $t == "number" || $t == "bool" || $t == "null" { null } else { $v.string() }
 
 output:
   sql_insert:
