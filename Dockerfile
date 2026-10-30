@@ -11,14 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Modified by ELEMENTS Consulting GmbH (2026): Go-Proxy auf proxy.golang.org
+# umgestellt (statt golangproxy.umh.app), ARG APP_VERSION ergaenzt, Image-Label
+# auf dieses Repository gesetzt.
 
 FROM golang:1.27.1@sha256:3680233e3204827fbdc66088528ae6d4b3d034f51d03a99d454f6de034888244 AS build
+
+ARG APP_VERSION=dev
 
 RUN useradd -u 10001 benthos
 
 WORKDIR /go/src/github.com/united-manufacturing-hub/benthos-umh
 
-ENV GOPROXY=https://golangproxy.umh.app,https://proxy.golang.org,direct
+ENV GOPROXY=https://proxy.golang.org,direct
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -69,5 +75,5 @@ EXPOSE 4195
 
 USER benthos
 
-LABEL org.opencontainers.image.source=https://github.com/united-manufacturing-hub/benthos-umh
+LABEL org.opencontainers.image.source=https://github.com/ELEMENTSCONSULTING/opairs-connect-machine
 
