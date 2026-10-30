@@ -1,0 +1,531 @@
+// Copyright 2025 UMH Systems GmbH
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package modbus_plugin_test
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/grid-x/modbus"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	. "github.com/united-manufacturing-hub/benthos-umh/modbus_plugin"
+)
+
+var _ = Describe("Test Against Docker Modbus Simulator", func() {
+	BeforeEach(func() {
+		testModbusSimulator := os.Getenv("TEST_MODBUS_SIMULATOR")
+
+		// Check if environment variables are set
+		if testModbusSimulator == "" {
+			Skip("Skipping test: environment variables not set")
+			return
+		}
+	})
+
+	It("should connect and read discrete register", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		input := &ModbusInput{
+			SlaveIDs:    []byte{1},
+			BusyRetries: 1,
+			Addresses: []ModbusDataItemWithAddress{
+				{
+					Name:     "firstFlagOfDiscreteInput",
+					Register: "discrete",
+					Address:  1,
+					Type:     "BIT",
+					Output:   "BOOL",
+				},
+				{
+					Name:     "secondFlagOfDiscreteInput",
+					Register: "discrete",
+					Address:  2,
+					Type:     "BIT",
+					Output:   "BOOL",
+				},
+				{
+					Name:     "fourthFlagOfDiscreteInput",
+					Register: "discrete",
+					Address:  4,
+					Type:     "BIT",
+					Output:   "BOOL",
+				},
+			},
+			Handler: modbus.NewTCPClientHandler("127.0.0.1:50502"),
+		}
+		input.Client = modbus.NewClient(input.Handler)
+
+		// Parse the addresses into batches
+		var err error
+		rs, err := input.CreateBatchesFromAddresses(input.Addresses)
+		Expect(err).NotTo(HaveOccurred())
+		input.RequestSets = map[byte]RequestSet{}
+		for _, sid := range input.SlaveIDs {
+			input.RequestSets[sid] = rs
+		}
+
+		// Attempt to connect
+		err = input.Connect(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		messageBatch, _, err := input.ReadBatch(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(messageBatch).To(HaveLen(3))
+
+		for _, message := range messageBatch {
+			messageStruct, err := message.AsStructuredMut()
+			Expect(err).NotTo(HaveOccurred())
+
+			tagName, exists := message.MetaGet("modbus_tag_name")
+			Expect(exists).To(BeTrue())
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(messageStruct).To(BeAssignableToTypeOf(true))
+			switch tagName {
+			case "firstFlagOfDiscreteInput":
+				Expect(messageStruct).To(BeTrue())
+			case "secondFlagOfDiscreteInput":
+				Expect(messageStruct).To(BeFalse())
+			case "fourthFlagOfDiscreteInput":
+				Expect(messageStruct).To(BeFalse())
+			}
+
+			GinkgoWriter.Printf("Received message: %+v\n", messageStruct)
+		}
+
+		// Close connection
+		err = input.Close(ctx)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("should connect and read input register", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		input := &ModbusInput{
+			SlaveIDs:    []byte{1},
+			BusyRetries: 1,
+			Addresses: []ModbusDataItemWithAddress{
+				{
+					Name:     "zeroElementOfInputRegister",
+					Register: "input",
+					Address:  0,
+					Type:     "UINT16",
+				},
+				{
+					Name:     "firstElementOfInputRegister",
+					Register: "input",
+					Address:  1,
+					Type:     "UINT16",
+				},
+				{
+					Name:     "eighthElementOfInputRegister",
+					Register: "input",
+					Address:  8,
+					Type:     "UINT16",
+				},
+			},
+			Handler: modbus.NewTCPClientHandler("127.0.0.1:50502"),
+		}
+		input.Client = modbus.NewClient(input.Handler)
+
+		// Parse the addresses into batches
+		var err error
+		rs, err := input.CreateBatchesFromAddresses(input.Addresses)
+		Expect(err).NotTo(HaveOccurred())
+		input.RequestSets = map[byte]RequestSet{}
+		for _, sid := range input.SlaveIDs {
+			input.RequestSets[sid] = rs
+		}
+
+		// Attempt to connect
+		err = input.Connect(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		messageBatch, _, err := input.ReadBatch(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(messageBatch).To(HaveLen(3))
+
+		for _, message := range messageBatch {
+			messageStruct, err := message.AsStructuredMut()
+			Expect(err).NotTo(HaveOccurred())
+
+			tagName, exists := message.MetaGet("modbus_tag_name")
+			Expect(exists).To(BeTrue())
+			Expect(err).NotTo(HaveOccurred())
+
+			var zeroElement json.Number = "34009"
+			var firstElement json.Number = "16877"
+			var eighthElement json.Number = "116"
+			Expect(messageStruct).To(BeAssignableToTypeOf(zeroElement))
+
+			switch tagName {
+			case "zeroElementOfInputRegister":
+
+				Expect(messageStruct).To(Equal(zeroElement))
+			case "firstElementOfInputRegister":
+				Expect(messageStruct).To(Equal(firstElement))
+			case "eighthElementOfInputRegister":
+				Expect(messageStruct).To(Equal(eighthElement))
+			}
+
+			GinkgoWriter.Printf("Received message: %+v\n", messageStruct)
+		}
+
+		// Close connection
+		err = input.Close(ctx)
+		Expect(err).NotTo(HaveOccurred())
+	})
+})
+
+var _ = Describe("Test Against Wago-PLC", func() {
+	var wagoModbusEndpoint string
+
+	BeforeEach(func() {
+		wagoModbusEndpoint = os.Getenv("TEST_WAGO_MODBUS_ENDPOINT")
+
+		// Check if environment variables are set
+		if wagoModbusEndpoint == "" {
+			Skip("Skipping test: environment variables not set")
+			return
+		}
+	})
+
+	type ModbusRegister struct {
+		Addresses     []ModbusDataItemWithAddress
+		ExpectedValue json.Number
+	}
+
+	DescribeTable("Read discrete/coil/input/holding", func(tableEntry ModbusRegister) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		input := &ModbusInput{
+			SlaveIDs:    []byte{1},
+			BusyRetries: 1,
+			Addresses:   tableEntry.Addresses,
+			Handler:     modbus.NewTCPClientHandler(wagoModbusEndpoint),
+		}
+		input.Client = modbus.NewClient(input.Handler)
+
+		var err error
+		rs, err := input.CreateBatchesFromAddresses(input.Addresses)
+		Expect(err).NotTo(HaveOccurred())
+		input.RequestSets = map[byte]RequestSet{}
+		for _, sid := range input.SlaveIDs {
+			input.RequestSets[sid] = rs
+		}
+
+		err = input.Connect(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		messageBatch, _, err := input.ReadBatch(ctx)
+		Expect(err).NotTo(HaveOccurred())
+
+		// increase the batch-length by 1 because of the heartbeat
+		Expect(messageBatch).To(HaveLen(len(tableEntry.Addresses) + 1))
+
+		for _, message := range messageBatch {
+
+			tagName, exists := message.MetaGet("modbus_tag_name")
+			Expect(exists).To(BeTrue())
+
+			// skip the heartbeat if processed
+			if tagName == "heartbeat" {
+				GinkgoWriter.Printf("Skipping heartbeat message: %+v\n", message)
+				continue
+			}
+			Expect(tagName).To(Equal(tableEntry.Addresses[0].Name))
+
+			register, exists := message.MetaGet("modbus_tag_register")
+			Expect(exists).To(BeTrue())
+			Expect(register).To(Equal(tableEntry.Addresses[0].Register))
+
+			address, exists := message.MetaGet("modbus_tag_address")
+			Expect(exists).To(BeTrue())
+			Expect(address).To(Equal(strconv.FormatUint(uint64(tableEntry.Addresses[0].Address), 10)))
+
+			messageStruct, err := message.AsStructuredMut()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(messageStruct).To(BeAssignableToTypeOf(tableEntry.ExpectedValue))
+			Expect(messageStruct).To(Equal(tableEntry.ExpectedValue))
+
+			GinkgoWriter.Printf("Received message: %+v\n", messageStruct)
+		}
+
+		// Close connection
+		err = input.Close(ctx)
+		Expect(err).NotTo(HaveOccurred())
+	},
+		Entry("discrete (input)",
+			ModbusRegister{
+				Addresses: []ModbusDataItemWithAddress{
+					{
+						Name:     "modbusBoolIn",
+						Register: "discrete",
+						Address:  0,
+						Type:     "BOOL",
+					},
+				},
+				ExpectedValue: "1",
+			}),
+		Entry("coil (output)",
+			ModbusRegister{
+				Addresses: []ModbusDataItemWithAddress{
+					{
+						Name:     "modbusBoolOut",
+						Register: "coil",
+						Address:  1,
+						Type:     "BOOL",
+					},
+				},
+				ExpectedValue: "1",
+			}),
+		Entry("input (input)",
+			ModbusRegister{
+				Addresses: []ModbusDataItemWithAddress{
+					{
+						Name:     "modbusIntIn",
+						Register: "input",
+						Address:  1,
+						Type:     "INT16",
+					},
+				},
+				ExpectedValue: "1234",
+			}),
+		Entry("holding (output)",
+			ModbusRegister{
+				Addresses: []ModbusDataItemWithAddress{
+					{
+						Name:     "modbusIntOut",
+						Register: "holding",
+						Address:  2,
+						Type:     "INT16",
+					},
+				},
+				ExpectedValue: "1234",
+			}),
+	)
+})
+
+var _ = Describe("Per-Slave Address Routing", func() {
+	BeforeEach(func() {
+		testActive, ok := os.LookupEnv("TEST_MODBUS_UNITTEST")
+
+		// Check if unit test variable is set
+		if !ok || strings.ToLower(testActive) == "false" {
+			Skip("Skipping test: TEST_MODBUS_UNITTEST env variable is not set or is FALSE")
+			return
+		}
+	})
+	// Helper to build per-slave RequestSets with validation and deduplication,
+	// mimicking the constructor logic. Optionally tracks deduplicated addresses.
+	buildPerSlaveRequestSets := func(input *ModbusInput, tracking map[byte][]ModbusDataItemWithAddress) error {
+		// Validation: if slaveID is non-zero, it must exist in top-level slaveIDs
+		for _, item := range input.Addresses {
+			if item.SlaveID != 0 {
+				found := false
+				for _, sid := range input.SlaveIDs {
+					if sid == item.SlaveID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("address %q has slaveID %d which is not in the top-level slaveIDs list", item.Name, item.SlaveID)
+				}
+			}
+		}
+
+		// Build per-slave address lists
+		perSlaveAddresses := make(map[byte][]ModbusDataItemWithAddress)
+		for _, item := range input.Addresses {
+			if item.SlaveID == 0 {
+				for _, sid := range input.SlaveIDs {
+					perSlaveAddresses[sid] = append(perSlaveAddresses[sid], item)
+				}
+			} else {
+				perSlaveAddresses[item.SlaveID] = append(perSlaveAddresses[item.SlaveID], item)
+			}
+		}
+
+		// Second-pass dedup: within each slave, dedup by register+address
+		for sid, addrs := range perSlaveAddresses {
+			seen := make(map[string]bool)
+			deduped := make([]ModbusDataItemWithAddress, 0, len(addrs))
+			for _, item := range addrs {
+				key := fmt.Sprintf("%s:%d", item.Register, item.Address)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				deduped = append(deduped, item)
+			}
+			perSlaveAddresses[sid] = deduped
+			if tracking != nil {
+				tracking[sid] = deduped
+			}
+		}
+
+		// Build RequestSets
+		input.RequestSets = make(map[byte]RequestSet)
+		for sid, addrs := range perSlaveAddresses {
+			rs, err := input.CreateBatchesFromAddresses(addrs)
+			if err != nil {
+				return err
+			}
+			input.RequestSets[sid] = rs
+		}
+		return nil
+	}
+
+	It("should route addresses to specific slaves", func() {
+		input := &ModbusInput{
+			SlaveIDs:    []byte{1, 2},
+			BusyRetries: 1,
+			Addresses: []ModbusDataItemWithAddress{
+				{Name: "tempSlave1", Register: "holding", Address: 100, Type: "INT16", SlaveID: 1},
+				{Name: "tempSlave2", Register: "holding", Address: 200, Type: "INT16", SlaveID: 2},
+				{Name: "shared", Register: "holding", Address: 300, Type: "INT16", SlaveID: 0},
+			},
+		}
+
+		err := buildPerSlaveRequestSets(input, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Both slaves should have RequestSets
+		Expect(input.RequestSets).To(HaveLen(2))
+		_, exists1 := input.RequestSets[1]
+		Expect(exists1).To(BeTrue())
+		_, exists2 := input.RequestSets[2]
+		Expect(exists2).To(BeTrue())
+	})
+
+	It("should be backwards compatible with no slaveID field", func() {
+		input := &ModbusInput{
+			SlaveIDs:    []byte{1, 2, 3},
+			BusyRetries: 1,
+			Addresses: []ModbusDataItemWithAddress{
+				{Name: "temp", Register: "holding", Address: 100, Type: "INT16"},
+				{Name: "pressure", Register: "holding", Address: 200, Type: "INT16"},
+			},
+		}
+
+		err := buildPerSlaveRequestSets(input, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		// All 3 slaves should have RequestSets
+		Expect(input.RequestSets).To(HaveLen(3))
+		_, exists1 := input.RequestSets[1]
+		Expect(exists1).To(BeTrue())
+		_, exists2 := input.RequestSets[2]
+		Expect(exists2).To(BeTrue())
+		_, exists3 := input.RequestSets[3]
+		Expect(exists3).To(BeTrue())
+	})
+
+	It("should allow same register+address for different slaves", func() {
+		input := &ModbusInput{
+			SlaveIDs:    []byte{1, 2},
+			BusyRetries: 1,
+			Addresses: []ModbusDataItemWithAddress{
+				{Name: "tempSlave1", Register: "holding", Address: 100, Type: "INT16", SlaveID: 1},
+				{Name: "tempSlave2", Register: "holding", Address: 100, Type: "INT16", SlaveID: 2},
+			},
+		}
+
+		err := buildPerSlaveRequestSets(input, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Both slaves should have their own RequestSet
+		Expect(input.RequestSets).To(HaveLen(2))
+		_, exists1 := input.RequestSets[1]
+		Expect(exists1).To(BeTrue())
+		_, exists2 := input.RequestSets[2]
+		Expect(exists2).To(BeTrue())
+	})
+
+	It("should skip slaves with no addresses in ReadBatch", func() {
+		// Slave 3 is in the slaveIDs list but has no addresses assigned
+		input := &ModbusInput{
+			SlaveIDs:    []byte{1, 2, 3},
+			BusyRetries: 1,
+			Addresses: []ModbusDataItemWithAddress{
+				{Name: "tempSlave1", Register: "holding", Address: 100, Type: "INT16", SlaveID: 1},
+				{Name: "tempSlave2", Register: "holding", Address: 200, Type: "INT16", SlaveID: 2},
+			},
+		}
+
+		err := buildPerSlaveRequestSets(input, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Only slaves 1 and 2 should have RequestSets
+		Expect(input.RequestSets).To(HaveLen(2))
+		_, exists3 := input.RequestSets[3]
+		Expect(exists3).To(BeFalse())
+	})
+
+	It("should error when address slaveID is not in top-level slaveIDs", func() {
+		input := &ModbusInput{
+			SlaveIDs:    []byte{1, 2},
+			BusyRetries: 1,
+			Addresses: []ModbusDataItemWithAddress{
+				{Name: "temp", Register: "holding", Address: 100, Type: "INT16", SlaveID: 3},
+			},
+		}
+
+		err := buildPerSlaveRequestSets(input, nil)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("slaveID 3"))
+		Expect(err.Error()).To(ContainSubstring("not in the top-level slaveIDs"))
+	})
+
+	It("should deduplicate when global address (slaveID=0) overlaps with specific slave address", func() {
+		input := &ModbusInput{
+			SlaveIDs:    []byte{1, 2},
+			BusyRetries: 1,
+			Addresses: []ModbusDataItemWithAddress{
+				{Name: "globalTemp", Register: "holding", Address: 100, Type: "INT16", SlaveID: 0},
+				{Name: "slave1Temp", Register: "holding", Address: 100, Type: "INT16", SlaveID: 1},
+			},
+		}
+
+		// Track deduplicated addresses per slave
+		dedupedAddresses := make(map[byte][]ModbusDataItemWithAddress)
+		err := buildPerSlaveRequestSets(input, dedupedAddresses)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Both slaves should have RequestSets
+		Expect(input.RequestSets).To(HaveLen(2))
+
+		// Slave 1: should have only globalTemp (first wins), not slave1Temp
+		Expect(dedupedAddresses[1]).To(HaveLen(1))
+		Expect(dedupedAddresses[1][0].Name).To(Equal("globalTemp"))
+
+		// Slave 2: should have globalTemp (no overlap)
+		Expect(dedupedAddresses[2]).To(HaveLen(1))
+		Expect(dedupedAddresses[2][0].Name).To(Equal("globalTemp"))
+	})
+})

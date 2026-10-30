@@ -1,0 +1,158 @@
+# Copyright 2025 UMH Systems GmbH
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+SRC_ROOT := $(shell git rev-parse --show-toplevel)
+
+
+LICENSE_EYE_VERSION   = v0.9.0
+LINT_VERSION          = v2.13.2
+NILAWAY_VERSION       = v0.0.0-20260918162853-acb8859b9031
+PROTOC_GEN_GO_VERSION = v1.36.12
+PROTOC_VERSION        = cbbe65675855d0db6d94a43f565952c69ef7fc58081569837d44af3f044aa73d
+GRAPHVIZ_VERSION      = 939f896cd783daeed8ab08c446f3e2b79213f5e5d87d73bada58667f3bcd8906
+GOFUMPT_VERSION       = v0.12.0
+GCI_VERSION           = v0.14.0
+GOTESTSUM_VERSION     = v1.13.0
+CHANGIE_VERSION       = v1.26.0
+
+# ---------------------------------------------------
+# Pinned URLs for go install
+# ---------------------------------------------------
+#  we might add some additional tools later e.g. golangci-lint/gofmt
+LICENSE_EYE_URL   := github.com/apache/skywalking-eyes/cmd/license-eye@$(LICENSE_EYE_VERSION)
+LINT_URL          := github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(LINT_VERSION)
+NILAWAY_URL       := go.uber.org/nilaway/cmd/nilaway@$(NILAWAY_VERSION)
+PROTOC_GEN_GO_URL := google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+GOFUMPT_URL       := mvdan.cc/gofumpt@$(GOFUMPT_VERSION)
+GCI_URL           := github.com/daixiang0/gci@$(GCI_VERSION)
+GOTESTSUM_URL     := gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
+CHANGIE_URL       := github.com/miniscruff/changie@$(CHANGIE_VERSION)
+
+
+TOOLS_BIN_DIR    := $(SRC_ROOT)/.tools
+
+
+# ---------------------------------------------------
+# Tools references
+# ---------------------------------------------------
+LICENSE_EYE := $(TOOLS_BIN_DIR)/license-eye
+LINT        := $(TOOLS_BIN_DIR)/golangci-lint
+NILAWAY     := $(TOOLS_BIN_DIR)/nilaway
+PROTOC      := docker run --rm -v $(PWD):$(PWD) -w $(PWD) rvolosatovs/protoc@sha256:$(PROTOC_VERSION)
+DOT         := $(TOOLS_BIN_DIR)/graphviz/dot
+GOFUMPT     := $(TOOLS_BIN_DIR)/gofumpt
+GCI         := $(TOOLS_BIN_DIR)/gci
+GOTESTSUM   := $(TOOLS_BIN_DIR)/gotestsum
+CHANGIE     := $(TOOLS_BIN_DIR)/changie
+
+$(TOOLS_BIN_DIR):
+	@mkdir -p $@
+
+$(LICENSE_EYE): $(TOOLS_BIN_DIR)
+	@GOBIN=$(TOOLS_BIN_DIR) go install $(LICENSE_EYE_URL)
+
+$(LINT): $(TOOLS_BIN_DIR)
+	@GOBIN=$(TOOLS_BIN_DIR) go install $(LINT_URL)
+
+$(NILAWAY): $(TOOLS_BIN_DIR)
+	@GOBIN=$(TOOLS_BIN_DIR) go install $(NILAWAY_URL)
+
+$(DOT): $(TOOLS_BIN_DIR)
+	@mkdir -p $(dir $(DOT))
+	@printf '#!/bin/sh\n' > $(DOT)
+	@printf 'exec docker run --rm -i minidocks/graphviz@sha256:$(GRAPHVIZ_VERSION) dot "$$@"\n' >> $(DOT)
+	@chmod +x $(DOT)
+
+$(GOFUMPT): $(TOOLS_BIN_DIR)
+	@GOBIN=$(TOOLS_BIN_DIR) go install $(GOFUMPT_URL)
+
+$(GCI): $(TOOLS_BIN_DIR)
+	@GOBIN=$(TOOLS_BIN_DIR) go install $(GCI_URL)
+
+$(GOTESTSUM): $(TOOLS_BIN_DIR)
+	@GOBIN=$(TOOLS_BIN_DIR) go install $(GOTESTSUM_URL)
+
+$(CHANGIE): $(TOOLS_BIN_DIR)
+	@GOBIN=$(TOOLS_BIN_DIR) go install $(CHANGIE_URL)
+
+.PHONY: install-license-eye
+install-license-eye: $(LICENSE_EYE)
+
+.PHONY: install-tools
+install-tools: $(LICENSE_EYE) $(LINT) $(NILAWAY) $(DOT) $(GOFUMPT) $(GCI) $(GOTESTSUM) $(CHANGIE)
+
+.PHONY: help
+help:
+	@echo "Quick Start:"
+	@echo "  make run CONFIG=./config/stdout.yaml"
+	@echo ""
+	@echo "Common Commands:"
+	@echo "  make all      Clean build from scratch"
+	@echo "  make build   Build binary (faster for repeated builds)"
+	@echo "  make test     Run all unit tests"
+	@echo ""
+	@echo "When to use what:"
+	@echo "  make run     Quick iteration with different configs, needs CONFIG var."
+	@echo "  make build   Build once, then test multiple configs manually"
+	@echo ""
+	@echo "Testing:"
+	@echo "  Most tests run without hardware (unit tests only)"
+	@echo "  To test against real PLCs, set environment variables first"
+	@echo "  See: make env"
+	@echo ""
+	@echo "Profiling:"
+	@echo "  make serve-pprof   Start pprof web server on :8080"
+	@echo "                     (requires http.debug_endpoints: true in config)"
+	@echo ""
+
+.PHONY: env
+env:
+	@echo "OPC UA Unit Tests (make test-unit-opc):"
+	@echo "  No env vars required - runs pure unit tests"
+	@echo ""
+	@echo "OPC UA Integration Tests (make test-integration-opc):"
+	@echo "  Tests auto-detect based on which env vars are set:"
+	@echo "  TEST_OPCUA_SIMULATOR=true     -> OPC simulator tests"
+	@echo "  TEST_S7_ENDPOINT_URI=...      -> S7 PLC tests"
+	@echo "  TEST_WAGO_ENDPOINT_URI=...    -> WAGO PLC tests"
+	@echo "  TEST_KEPWARE_ENDPOINT=...     -> Kepware tests"
+	@echo ""
+	@echo "  Additional WAGO variables:"
+	@echo "  TEST_WAGO_USERNAME=myuser"
+	@echo "  TEST_WAGO_PASSWORD=mypassword"
+	@echo ""
+	@echo "  Additional Kepware variables:"
+	@echo "  TEST_KEPWARE_USERNAME=myuser"
+	@echo "  TEST_KEPWARE_PASSWORD=mypassword"
+	@echo ""
+	@echo "S7 PLC Tests (make test-s7comm):"
+	@echo "  TEST_S7COMM_UNITTEST=true"
+	@echo "  TEST_S7_TCPDEVICE=<ip:port>"
+	@echo "  TEST_S7_RACK=<rack_number>"
+	@echo "  TEST_S7_SLOT=<slot_number>"
+	@echo ""
+	@echo "Modbus Tests (make test-modbus):"
+	@echo "  TEST_MODBUS_SIMULATOR=true"
+	@echo "  TEST_WAGO_MODBUS_ENDPOINT=<ip:port>  (for WAGO tests)"
+	@echo ""
+	@echo "Sensorconnect Tests (make test-sensorconnect):"
+	@echo "  TEST_DEBUG_IFM_ENDPOINT=<ip_address>"
+	@echo ""
+	@echo "Other plugin tests:"
+	@echo "  TEST_NODERED_JS=true           (make test-noderedjs)"
+	@echo "  TEST_TAG_PROCESSOR=true        (make test-tag-processor)"
+	@echo "  TEST_CLASSIC_TO_CORE=1         (make test-classic-to-core)"
+	@echo "  TEST_TOPIC_BROWSER=1           (make test-topic-browser)"
+	@echo "  TEST_DOWNSAMPLER=1             (make test-downsampler)"
+	@echo ""

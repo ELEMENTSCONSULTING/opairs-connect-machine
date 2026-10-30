@@ -1,0 +1,119 @@
+// Copyright 2025 UMH Systems GmbH
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/redpanda-data/benthos/v4/public/service"
+)
+
+// generateVersionedFilename creates a versioned filename by stripping 'v' prefix
+func generateVersionedFilename(version string) string {
+	cleanVersion := strings.TrimPrefix(version, "v")
+	return fmt.Sprintf("benthos-schemas-v%s.json", cleanVersion)
+}
+
+func main() {
+	version := flag.String("version", "", "Benthos-UMH version (required)")
+	// format flag accepts three output schema formats:
+	// - "benthos": Raw Benthos plugin specification format (default)
+	//   Used by: Management Console UI for displaying plugin configuration forms
+	// - "json-schema": JSON Schema Draft-07 format for Monaco editor
+	//   Used by: Web-based config editors for syntax validation/autocomplete
+	// - "mapping": read->write plugin pairing for write flows
+	//   Used by: Management Console to pair an input plugin with its output plugin
+	format := flag.String("format", "benthos", "Output format: benthos, json-schema or mapping")
+	flag.Parse()
+
+	if *version == "" {
+		fmt.Fprintf(os.Stderr, "Error: -version flag is required\n")
+		fmt.Fprintf(os.Stderr, "Usage: schema-export -version 0.11.6 [-format benthos|json-schema|mapping]\n")
+		os.Exit(1)
+	}
+
+	// Add path traversal protection
+	if strings.ContainsAny(*version, "/\\") {
+		fmt.Fprintf(os.Stderr, "Error: -version contains invalid path characters\n")
+		fmt.Fprintf(os.Stderr, "Version should be a semantic version like 0.11.6\n")
+		os.Exit(1)
+	}
+
+	// Validate format flag
+	if err := validateFormat(*format); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Usage: schema-export -version 0.11.6 [-format benthos|json-schema|mapping]\n")
+		os.Exit(1)
+	}
+
+	if *format == "mapping" {
+		mapping := buildMapping(service.GlobalEnvironment(), readWriteOverrides)
+		mappingData, err := json.MarshalIndent(mapping, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error marshaling mapping JSON: %v\n", err)
+			os.Exit(1)
+		}
+		err = os.WriteFile("read-write-mapping.json", mappingData, 0o644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ Generated read→write mapping to read-write-mapping.json (%d pairs)\n", len(mapping))
+		return
+	}
+
+	schemas, err := generateSchemas()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating schemas: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Generate schema in requested format
+	output, err := generateSchemaWithFormat(schemas, *format, *version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating schema with format %s: %v\n", *format, err)
+		os.Exit(1)
+	}
+
+	data, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling JSON: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Generate output filename based on format
+	var outputFile string
+	if *format == "json-schema" {
+		// Output as schema.json (version is in $id within the schema itself)
+		outputFile = "schema.json"
+	} else {
+		outputFile = generateVersionedFilename(*version)
+	}
+
+	if err := os.WriteFile(outputFile, data, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✅ Generated schemas to %s\n", outputFile)
+	fmt.Printf("   - Format: %s\n", *format)
+	fmt.Printf("   - %d inputs\n", len(schemas.Inputs))
+	fmt.Printf("   - %d processors\n", len(schemas.Processors))
+	fmt.Printf("   - %d outputs\n", len(schemas.Outputs))
+}

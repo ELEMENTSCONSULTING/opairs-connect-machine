@@ -1,0 +1,73 @@
+# Copyright 2023 UMH Systems GmbH
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+FROM golang:1.27.1@sha256:3680233e3204827fbdc66088528ae6d4b3d034f51d03a99d454f6de034888244 AS build
+
+RUN useradd -u 10001 benthos
+
+WORKDIR /go/src/github.com/united-manufacturing-hub/benthos-umh
+
+ENV GOPROXY=https://golangproxy.umh.app,https://proxy.golang.org,direct
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY ./pkg ./pkg
+COPY ./cmd ./cmd
+COPY ./beckhoff_ads_plugin ./beckhoff_ads_plugin
+COPY ./downsampler_plugin ./downsampler_plugin
+COPY ./opcua_plugin ./opcua_plugin
+COPY ./s7comm_plugin ./s7comm_plugin
+COPY ./modbus_plugin ./modbus_plugin
+COPY ./nodered_js_plugin ./nodered_js_plugin
+COPY ./tag_processor_plugin ./tag_processor_plugin
+COPY ./sensorconnect_plugin ./sensorconnect_plugin
+COPY ./eip_plugin ./eip_plugin
+COPY ./uns_plugin ./uns_plugin
+COPY ./topic_browser_plugin ./topic_browser_plugin
+COPY ./classic_to_core_plugin ./classic_to_core_plugin
+COPY ./sparkplug_plugin ./sparkplug_plugin
+COPY ./stream_processor_plugin ./stream_processor_plugin
+COPY ./snowflake_put_plugin ./snowflake_put_plugin
+COPY ./historian_plugin ./historian_plugin
+
+ENV CGO_ENABLED=0
+RUN go build \
+    -ldflags "-s -w \
+    -X github.com/redpanda-data/benthos/v4/internal/cli.Version=${APP_VERSION} \
+    -X github.com/redpanda-data/benthos/v4/internal/cli.DateBuilt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    -o benthos \
+    cmd/benthos/main.go
+
+FROM scratch AS app
+
+WORKDIR /
+
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /etc/passwd /etc/passwd
+COPY --from=build /go/src/github.com/united-manufacturing-hub/benthos-umh/benthos benthos
+COPY ./config/default.yaml /benthos.yaml
+COPY ./templates /templates
+COPY ./proto /proto
+
+ENTRYPOINT ["/benthos"]
+
+CMD ["-c", "/benthos.yaml", "-t", "/templates/*.yaml"]
+
+EXPOSE 4195
+
+USER benthos
+
+LABEL org.opencontainers.image.source=https://github.com/united-manufacturing-hub/benthos-umh
+

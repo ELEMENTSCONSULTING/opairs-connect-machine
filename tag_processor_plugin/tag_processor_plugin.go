@@ -1,0 +1,933 @@
+// Copyright 2025 UMH Systems GmbH
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package tag_processor_plugin
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/dop251/goja"
+	"github.com/redpanda-data/benthos/v4/public/service"
+
+	"github.com/united-manufacturing-hub/benthos-umh/nodered_js_plugin"
+	"github.com/united-manufacturing-hub/benthos-umh/nodered_js_plugin/cache"
+	"github.com/united-manufacturing-hub/benthos-umh/pkg/umh/topic"
+)
+
+// sentinelNoTimestamp indicates no valid timestamp was found. MinInt64 is used because
+// 0 and -1 are valid Unix timestamps; MinInt64 (~292B years in the past) is not.
+const sentinelNoTimestamp = math.MinInt64
+
+type TagProcessorConfig struct {
+	Defaults           string            `json:"defaults" yaml:"defaults"`
+	Conditions         []ConditionConfig `json:"conditions" yaml:"conditions"`
+	AdvancedProcessing string            `json:"advancedProcessing" yaml:"advancedProcessing"`
+}
+
+type ConditionConfig struct {
+	If   string `json:"if" yaml:"if"`
+	Then string `json:"then" yaml:"then"`
+}
+
+func init() {
+	spec := service.NewConfigSpec().
+		Version("1.0.0").
+		Summary("A processor for standardizing tag metadata and topics").
+		Description(`The tagProcessor sets up a canonical metadata structure for constructing standardized topic and payload schemas.
+It applies defaults, conditional transformations, and optional advanced processing using a Node-RED style JavaScript environment.
+
+Required metadata fields:
+- location_path: Hierarchical location path in dot notation (e.g., "enterprise.site.area.line.workcell.plc123")
+- data_contract: Data schema identifier (e.g., "_historian", "_analytics")
+- tag_name: Name of the tag/variable (e.g., "temperature")
+
+Optional metadata fields:
+- virtual_path: Logical, non-physical grouping path in dot notation (e.g., "axis.x.position")
+
+The final topic will be constructed as:
+umh.v1.<location_path>.<data_contract>.<virtual_path>.<tag_name>
+
+Empty or undefined fields will be omitted from the topic.`).
+		Field(service.NewStringField("defaults").
+			Description("JavaScript code to set initial metadata values").
+			Default("")).
+		Field(service.NewObjectListField(
+			"conditions",
+			service.NewStringField("if").Description("JavaScript condition expression"),
+			service.NewStringField("then").Description("JavaScript code to execute if condition is true"),
+		).Description("List of conditions to evaluate").
+			Optional()).
+		Field(service.NewStringField("advancedProcessing").
+			Description("Optional JavaScript code for advanced message processing").
+			Default("").
+			Optional())
+
+	err := service.RegisterBatchProcessor(
+		"tag_processor",
+		spec,
+		func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchProcessor, error) {
+			defaults, err := conf.FieldString("defaults")
+			if err != nil {
+				return nil, err
+			}
+
+			var conditions []ConditionConfig
+			if conf.Contains("conditions") {
+				conditionsArray, err := conf.FieldObjectList("conditions")
+				if err != nil {
+					return nil, err
+				}
+
+				for _, condObj := range conditionsArray {
+					ifExpr, err := condObj.FieldString("if")
+					if err != nil {
+						return nil, err
+					}
+
+					thenCode, err := condObj.FieldString("then")
+					if err != nil {
+						return nil, err
+					}
+
+					conditions = append(conditions, ConditionConfig{
+						If:   ifExpr,
+						Then: thenCode,
+					})
+				}
+			}
+
+			advancedProcessing, _ := conf.FieldString("advancedProcessing")
+
+			config := TagProcessorConfig{
+				Defaults:           defaults,
+				Conditions:         conditions,
+				AdvancedProcessing: advancedProcessing,
+			}
+
+			return newTagProcessor(config, mgr.Logger(), mgr.Metrics())
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+}
+
+type TagProcessor struct {
+	config TagProcessorConfig
+	logger *service.Logger
+
+	// VM pooling infrastructure - Phase 1 optimization
+	vmpool       sync.Pool
+	vmPoolHits   *service.MetricCounter
+	vmPoolMisses *service.MetricCounter
+
+	// Compiled programs - Phase 2 optimization
+	defaultsProgram       *goja.Program   // Pre-compiled defaults code
+	conditionPrograms     []*goja.Program // Pre-compiled condition evaluations
+	conditionThenPrograms []*goja.Program // Pre-compiled condition actions
+	advancedProgram       *goja.Program   // Pre-compiled advanced processing
+
+	// Original code for error logging - Phase 2 enhancement
+	originalDefaults   string
+	originalConditions []ConditionConfig
+	originalAdvanced   string
+
+	// Existing metrics
+	messagesProcessed *service.MetricCounter
+	messagesDropped   *service.MetricCounter
+
+	// Keep for JS environment setup helper methods
+	jsProcessor *nodered_js_plugin.NodeREDJSProcessor
+}
+
+func newTagProcessor(config TagProcessorConfig, logger *service.Logger, metrics *service.Metrics) (*TagProcessor, error) {
+	// TagProcessor only uses the JS processor for SetupJSEnvironment, not for caching.
+	// In-memory with no expiration is sufficient here.
+	jsProcessor, err := nodered_js_plugin.NewNodeREDJSProcessor("", logger, metrics, cache.NewMemoryStore(0))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create JS processor: %w", err)
+	}
+
+	processor := &TagProcessor{
+		config: config,
+		logger: logger,
+
+		// Initialize VM pool without New function - Get() will return nil when pool is empty
+		vmpool: sync.Pool{},
+
+		// VM pool metrics
+		vmPoolHits:   metrics.NewCounter("vm_pool_hits"),
+		vmPoolMisses: metrics.NewCounter("vm_pool_misses"),
+
+		// Store original code for error logging - Phase 2 enhancement
+		originalDefaults:   config.Defaults,
+		originalConditions: config.Conditions,
+		originalAdvanced:   config.AdvancedProcessing,
+
+		// Existing metrics
+		messagesProcessed: metrics.NewCounter("messages_processed"),
+		messagesDropped:   metrics.NewCounter("messages_dropped", "reason"),
+
+		jsProcessor: jsProcessor,
+	}
+
+	// Phase 2: Compile all JavaScript once at startup to catch errors early and optimize runtime
+	if err := processor.compilePrograms(); err != nil {
+		return nil, fmt.Errorf("failed to compile JavaScript programs: %w", err)
+	}
+
+	return processor, nil
+}
+
+// VM Pool Management Methods - Phase 1 Optimization
+
+// getVM acquires a VM from the pool and tracks metrics
+func (p *TagProcessor) getVM() *goja.Runtime {
+	poolResult := p.vmpool.Get()
+	if poolResult == nil {
+		// Pool is empty, create new VM and track as miss
+		p.vmPoolMisses.Incr(1)
+		return goja.New()
+	}
+	// Successfully reused VM from pool, track as hit
+	p.vmPoolHits.Incr(1)
+	return poolResult.(*goja.Runtime)
+}
+
+// putVM returns a VM to the pool after proper cleanup
+func (p *TagProcessor) putVM(vm *goja.Runtime) {
+	// Comprehensive VM cleanup to prevent state leakage
+	if err := p.clearVMState(vm); err != nil {
+		p.logger.Errorf("Failed to clear VM state: %v", err)
+		// In case of an error, we do not return the VM to the pool
+		// because it might be in an invalid state
+		return
+	}
+	// Return cleaned VM to pool for reuse
+	p.vmpool.Put(vm)
+}
+
+// clearVMState performs comprehensive cleanup of VM state
+func (p *TagProcessor) clearVMState(vm *goja.Runtime) error {
+	// Clear any interrupt flag that might be set to prevent state pollution
+	vm.ClearInterrupt()
+	return vm.GlobalObject().Set("msg", nil)
+}
+
+// setupMessageForVM prepares a VM with message data for execution
+func (p *TagProcessor) setupMessageForVM(ctx context.Context, vm *goja.Runtime, msg *service.Message, jsMsg map[string]any) error {
+	// Initialize meta if it doesn't exist
+	if _, exists := jsMsg["meta"]; !exists {
+		jsMsg["meta"] = make(map[string]any)
+	}
+
+	// Add existing metadata to jsMsg.meta
+	meta := jsMsg["meta"].(map[string]any)
+	if err := msg.MetaWalkMut(func(key string, value any) error {
+		meta[key] = value
+		return nil
+	}); err != nil {
+		return fmt.Errorf("metadata extraction failed: %w", err)
+	}
+
+	// Setup JS environment using helper from NodeREDJSProcessor
+	if err := p.jsProcessor.SetupJSEnvironment(ctx, vm, jsMsg); err != nil {
+		return fmt.Errorf("JS environment setup failed: %w", err)
+	}
+
+	// Set the msg variable in the JavaScript VM
+	if err := vm.Set("msg", jsMsg); err != nil {
+		return fmt.Errorf("JS message setup failed: %w", err)
+	}
+
+	return nil
+}
+
+// TODO: Each time there is any execution error, output the code where the error happened as well as the message that caused it (see nodered_js_plugin). Double-check that it is not being outputted twice.
+func (p *TagProcessor) ProcessBatch(ctx context.Context, batch service.MessageBatch) ([]service.MessageBatch, error) {
+	// Store incoming metadata: capture current meta as JSON in _initialMetadata, keys in _incomingKeys.
+	for _, msg := range batch {
+		if msg == nil {
+			continue
+		}
+		// Only store if not already set (for example, in case of multiple processing steps).
+		if _, exists := msg.MetaGet("_initialMetadata"); !exists {
+			originalMeta := make(map[string]string)
+			_ = msg.MetaWalkMut(func(key string, value any) error {
+				if str, ok := value.(string); ok {
+					originalMeta[key] = str
+				}
+				return nil
+			})
+			if encoded, err := json.Marshal(originalMeta); err != nil {
+				p.logger.Errorf("failed to marshal original metadata: %v", err)
+			} else {
+				msg.MetaSet("_initialMetadata", string(encoded))
+			}
+			// Record the list of original keys as a comma-separated string.
+			var keys []string
+			for k := range originalMeta {
+				keys = append(keys, k)
+			}
+			msg.MetaSet("_incomingKeys", strings.Join(keys, ","))
+		}
+	}
+
+	// Process defaults with compiled program
+	if p.defaultsProgram != nil {
+		batch, _ = p.processMessageBatchWithProgram(ctx, batch, p.defaultsProgram, "defaults")
+	}
+
+	// Process conditions with compiled programs (Phase 2 optimization)
+	for i := range p.config.Conditions {
+		var newBatch service.MessageBatch
+
+		for _, msg := range batch {
+			if msg == nil {
+				continue
+			}
+			processedMsgs, reason, stage, err := p.processConditionForMessageWithProgram(ctx, i, msg)
+			if err != nil {
+				// Drop-loudly: the poisoned message is absent from the output
+				// batch. The good messages flow.
+				nodered_js_plugin.RecordDrop(p.messagesDropped, p.logger, reason, "tag_processor", stage, msg, err)
+				continue
+			}
+			// Append all returned messages (could be 0, 1, or multiple)
+			newBatch = append(newBatch, processedMsgs...)
+		}
+
+		batch = newBatch
+	}
+
+	// Process advanced processing with compiled program (Phase 2 optimization)
+	if p.advancedProgram != nil {
+		batch, _ = p.processMessageBatchWithProgram(ctx, batch, p.advancedProgram, "advanced")
+	}
+
+	// Validate and construct final messages
+	var resultBatch service.MessageBatch
+	for _, msg := range batch {
+		if msg == nil {
+			continue
+		}
+
+		if err := p.validateMessage(msg); err != nil {
+			nodered_js_plugin.RecordDrop(p.messagesDropped, p.logger, "validation_missing_fields", "tag_processor", "final", msg, err)
+			continue
+		}
+
+		finalMsg, reason, err := p.constructFinalMessage(msg)
+		if err != nil {
+			nodered_js_plugin.RecordDrop(p.messagesDropped, p.logger, reason, "tag_processor", "final", msg, err)
+			continue
+		}
+
+		resultBatch = append(resultBatch, finalMsg)
+		p.messagesProcessed.Incr(1)
+	}
+
+	if len(resultBatch) == 0 {
+		// Return empty slice instead of nil to indicate successful filtering
+		// See: github.com/redpanda-data/benthos/v4/internal/component/processor/auto_observed.go:263-264
+		return []service.MessageBatch{}, nil
+	}
+
+	return []service.MessageBatch{resultBatch}, nil
+}
+
+// logJSError logs JavaScript execution errors with code context at Warn level.
+// Warn (not Error) because umh-core's benthos FSM treats Error-level logs as deploy-blocking;
+// a routine JS throw drops the message (RecordDrop Warns) but must not block the deploy.
+func (p *TagProcessor) logJSError(err error, code string, jsMsg map[string]any) {
+	jsErr := &goja.Exception{}
+	if errors.As(err, &jsErr) {
+		stack := jsErr.String()
+		p.logger.Warnf(`JavaScript execution failed:
+Error: %v
+Stack: %v
+Code:
+%v
+Message content: %v`,
+			jsErr.Error(),
+			stack,
+			code,
+			jsMsg)
+	} else {
+		p.logger.Warnf(`JavaScript execution failed:
+Error: %v
+Code:
+%v
+Message content: %v`,
+			err,
+			code,
+			jsMsg)
+	}
+}
+
+// logError logs general processing errors with message context at Warn level.
+// Warn (not Error) because umh-core's benthos FSM treats Error-level logs as deploy-blocking;
+// a routine validation failure drops the message (RecordDrop Warns) but must not block the deploy.
+func (p *TagProcessor) logError(err error, stage string, msg any) {
+	p.logger.Warnf(`Processing failed at stage '%s':
+Error: %v
+Message content: %v`,
+		stage,
+		err,
+		msg)
+}
+
+// validateMessage checks if a message has all required metadata fields
+func (p *TagProcessor) validateMessage(msg *service.Message) error {
+	var payloadJSON []byte
+	requiredFields := []string{"location_path", "data_contract", "tag_name"}
+	missingFields := []string{}
+
+	// Get current metadata for context
+	metadata := map[string]string{}
+	err := msg.MetaWalkMut(func(key string, value any) error {
+		if str, ok := value.(string); ok {
+			metadata[key] = str
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to walk message metadata: %w", err)
+	}
+
+	// Check for missing fields
+	for _, field := range requiredFields {
+		if _, exists := msg.MetaGet(field); !exists {
+			missingFields = append(missingFields, field)
+		}
+	}
+
+	if len(missingFields) > 0 {
+		var payloadStr string
+		payload, err := msg.AsStructuredMut()
+		if err != nil {
+			payloadStr = "unable to parse message payload"
+		} else {
+			// Try to format as JSON first
+			payloadJSON, err = json.MarshalIndent(payload, "", "  ")
+			if err != nil {
+				// If JSON formatting fails, use string representation
+				payloadStr = fmt.Sprintf("%v", payload)
+			} else {
+				payloadStr = string(payloadJSON)
+			}
+		}
+
+		// Convert metadata to pretty JSON
+		metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+		if err != nil {
+			metadataJSON = []byte("unable to format metadata as JSON")
+		}
+
+		// Create detailed error message with better formatting
+		errorMsg := fmt.Sprintf(`Message validation failed
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Missing fields: %s
+
+Current message:
+┌ Payload:
+%s
+
+└ Metadata:
+%s
+
+To fix: Set required fields (msg.meta.location_path, msg.meta.data_contract, msg.meta.tag_name) in defaults, conditions, or advancedProcessing.`,
+			strings.Join(missingFields, ", "),
+			payloadStr,
+			string(metadataJSON))
+
+		err = errors.New(errorMsg)
+		p.logError(err, "metadata validation", msg)
+		return err
+	}
+	return nil
+}
+
+// constructFinalMessage builds the final message (topic + payload), filtering internal metadata.
+// Returns drop reason ("value_convert_failed"/"topic_build_failed") for RecordDrop.
+func (p *TagProcessor) constructFinalMessage(msg *service.Message) (*service.Message, string, error) {
+	// NewMessage(nil) is safe: the engine restores input context (see nodered_js_plugin's ProcessBatch).
+	newMsg := service.NewMessage(nil)
+
+	// Clean up metadata values that might stringify to invalid values (e.g., virtual_path = null)
+	p.normalizeVirtualPathMetadata(msg)
+
+	// Retrieve the original incoming metadata stored in _initialMetadata.
+	originalMetaRaw, _ := msg.MetaGet("_initialMetadata")
+	originalMeta := map[string]string{}
+	if originalMetaRaw != "" {
+		if err := json.Unmarshal([]byte(originalMetaRaw), &originalMeta); err != nil {
+			p.logger.Warnf("failed to unmarshal _initialMetadata: %v", err)
+		}
+	}
+
+	// Copy all metadata to the new message
+	err := msg.MetaWalkMut(func(key string, value any) error {
+		if value == nil {
+			return nil
+		}
+		if str, ok := value.(string); ok {
+			newMsg.MetaSet(key, str)
+		} else if stringer, ok := value.(fmt.Stringer); ok {
+			newMsg.MetaSet(key, stringer.String())
+		} else {
+			newMsg.MetaSet(key, fmt.Sprintf("%v", value))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, "value_convert_failed", fmt.Errorf("failed to copy metadata: %w", err)
+	}
+
+	// Get the structured payload from the original message
+	structured, err := msg.AsStructured()
+	if err != nil {
+		return nil, "value_convert_failed", fmt.Errorf("failed to get structured payload: %w", err)
+	}
+	datatype, _ := msg.MetaGet("datatype")
+	value, err := p.convertValue(structured, datatype)
+	if err != nil {
+		return nil, "value_convert_failed", fmt.Errorf("failed to convert value: %w", err)
+	}
+
+	// Determine timestamp - use metadata timestamp_ms if available, otherwise current time
+	timestamp := time.Now().UnixMilli()
+
+	parsed := p.parseTimestamp(msg)
+	if parsed != sentinelNoTimestamp {
+		timestamp = parsed
+	}
+
+	// Build the final payload object
+	finalPayload := map[string]any{
+		"value":        value,
+		"timestamp_ms": timestamp,
+	}
+
+	newMsg.SetStructured(finalPayload)
+
+	// Set the topic in the new message metadata
+	topic, err := p.constructUMHTopic(msg)
+	if err != nil {
+		return nil, "topic_build_failed", fmt.Errorf("failed to construct UMH topic: %w", err)
+	}
+	newMsg.MetaSet("topic", topic) // topic is deprecated, use umh_topic instead for easy to understand difference between MQTT Topic, Kafka Topic and UMH Topic
+	newMsg.MetaSet("umh_topic", topic)
+
+	return newMsg, "", nil
+}
+
+// parseTimestamp extracts a timestamp from metadata (timestamp_ms → timestamp → sentinel).
+func (p *TagProcessor) parseTimestamp(msg *service.Message) int64 {
+	timestampMsStr, exists := msg.MetaGet("timestamp_ms")
+	if exists && timestampMsStr != "" {
+		parsed := p.parseTimestampToRFC3339Nano(timestampMsStr)
+		if parsed != sentinelNoTimestamp {
+			return parsed
+		}
+		p.logger.Warnf("Failed to parse timestamp_ms metadata '%s', trying timestamp field", timestampMsStr)
+	}
+
+	timestampStr, exists := msg.MetaGet("timestamp")
+	if exists && timestampStr != "" {
+		parsed := p.parseTimestampToRFC3339Nano(timestampStr)
+		if parsed != sentinelNoTimestamp {
+			return parsed
+		}
+		p.logger.Warnf("Failed to parse timestamp metadata '%s', using current time", timestampStr)
+	}
+
+	return sentinelNoTimestamp
+}
+
+// parseTimestampToRFC3339Nano parses Unix-ms strings or RFC3339Nano into milliseconds.
+// Returns sentinelNoTimestamp on failure.
+func (p *TagProcessor) parseTimestampToRFC3339Nano(value string) int64 {
+	if parsedMs, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return parsedMs
+	}
+
+	if parsedTime, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsedTime.UnixMilli()
+	}
+
+	return sentinelNoTimestamp
+}
+
+// convertValue coerces v to the given datatype. Falls back to auto-detection when datatype is empty.
+func (p *TagProcessor) convertValue(v any, datatype string) (any, error) {
+	switch datatype {
+	case "string":
+		return fmt.Sprintf("%v", v), nil
+	case "number":
+		str := fmt.Sprintf("%v", v)
+		_, err := strconv.ParseFloat(str, 64)
+		if err != nil {
+			return nil, fmt.Errorf("cannot convert %q to number: %w", str, err)
+		}
+		return json.Number(str), nil
+	case "bool":
+		str := fmt.Sprintf("%v", v)
+		b, err := strconv.ParseBool(str)
+		if err != nil {
+			return nil, fmt.Errorf("cannot convert %q to bool: %w", str, err)
+		}
+		return b, nil
+	default:
+		return p.autoConvertValue(v), nil
+	}
+}
+
+// autoConvertValue auto-detects the value type when no explicit datatype is set.
+func (p *TagProcessor) autoConvertValue(v any) any {
+	switch val := v.(type) {
+	case bool:
+		return val
+	case string:
+		return val
+	case float64, float32, int, int32, int64, uint, uint32, uint64:
+		return json.Number(fmt.Sprintf("%v", val))
+	case []any:
+		jsonBytes, err := json.Marshal(val)
+		if err != nil {
+			return fmt.Sprintf("%v", val)
+		}
+		return string(jsonBytes)
+	case map[string]any:
+		jsonBytes, err := json.Marshal(val)
+		if err != nil {
+			return fmt.Sprintf("%v", val)
+		}
+		return string(jsonBytes)
+	default:
+		str := fmt.Sprintf("%v", val)
+		_, err := strconv.ParseFloat(str, 64)
+		if err != nil {
+			return str
+		}
+		return json.Number(str)
+	}
+}
+
+// constructUMHTopic creates the topic string from message metadata using the Builder pattern
+func (p *TagProcessor) constructUMHTopic(msg *service.Message) (string, error) {
+	builder := topic.NewBuilder()
+
+	// Set location path
+	var locationPath string
+	if value, exists := msg.MetaGet("location_path"); exists && value != "" {
+		locationPath = value
+		builder.SetLocationPath(locationPath)
+	}
+
+	// Set data contract
+	var dataContract string
+	if value, exists := msg.MetaGet("data_contract"); exists && value != "" {
+		dataContract = value
+		builder.SetDataContract(dataContract)
+	}
+
+	// Set virtual path
+	var virtualPath string
+	if sanitized, ok := p.normalizeVirtualPathMetadata(msg); ok {
+		virtualPath = sanitized
+		builder.SetVirtualPath(virtualPath)
+	}
+
+	// Set tag name
+	var tagName string
+	if value, exists := msg.MetaGet("tag_name"); exists && value != "" {
+		tagName = value
+		builder.SetName(tagName)
+	}
+
+	// Build the topic string
+	topicStr, err := builder.BuildString()
+	if err != nil {
+		p.logger.Warnf("Failed to build UMH topic: %v (locationPath: %s, dataContract: %s, virtualPath: %s, tagName: %s)", err, locationPath, dataContract, virtualPath, tagName)
+		return "", fmt.Errorf("failed to build UMH topic: %w", err)
+	}
+
+	return topicStr, nil
+}
+
+// normalizeVirtualPathMetadata ensures virtual_path metadata is either a trimmed, meaningful value,
+// or removed entirely when it's empty/nil-like. Returns the sanitized value when present.
+func (p *TagProcessor) normalizeVirtualPathMetadata(msg *service.Message) (string, bool) {
+	value, exists := msg.MetaGet("virtual_path")
+	if !exists {
+		return "", false
+	}
+
+	sanitized := strings.TrimSpace(value)
+	if sanitized == "" {
+		msg.MetaDelete("virtual_path")
+		return "", false
+	}
+
+	switch strings.ToLower(sanitized) {
+	case "null", "nil", "<nil>", "undefined":
+		msg.MetaDelete("virtual_path")
+		return "", false
+	}
+
+	// Store the trimmed value for downstream consumers
+	msg.MetaSet("virtual_path", sanitized)
+	return sanitized, true
+}
+
+func (p *TagProcessor) Close(_ context.Context) error {
+	return nil
+}
+
+// compilePrograms compiles all JavaScript code once at startup for optimal runtime performance
+func (p *TagProcessor) compilePrograms() error {
+	var err error
+
+	// Compile defaults code
+	// WHY: Defaults processing happens for every message batch, so optimization is critical
+	if p.originalDefaults != "" {
+		wrappedCode := fmt.Sprintf(`(function(){'use strict';%s})()`, p.originalDefaults)
+		p.defaultsProgram, err = goja.Compile("defaults.js", wrappedCode, false)
+		if err != nil {
+			return fmt.Errorf("failed to compile defaults code: %w", err)
+		}
+	}
+
+	// Compile condition programs
+	// WHY: Conditions are evaluated for every message, making this the highest impact optimization
+	p.conditionPrograms = make([]*goja.Program, len(p.originalConditions))
+	p.conditionThenPrograms = make([]*goja.Program, len(p.originalConditions))
+
+	for i, condition := range p.originalConditions {
+		// Compile condition evaluation code
+		// WHY: Boolean condition evaluation happens most frequently
+		p.conditionPrograms[i], err = goja.Compile(
+			fmt.Sprintf("condition-%d-if.js", i),
+			condition.If,
+			false,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to compile condition %d 'if' code: %w", i, err)
+		}
+
+		// Compile condition action code
+		// WHY: Action code executes when conditions are true, also frequent
+		wrappedThenCode := fmt.Sprintf(`(function(){'use strict';%s})()`, condition.Then)
+		p.conditionThenPrograms[i], err = goja.Compile(
+			fmt.Sprintf("condition-%d-then.js", i),
+			wrappedThenCode,
+			false,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to compile condition %d 'then' code: %w", i, err)
+		}
+	}
+
+	// Compile advanced processing code
+	// WHY: Advanced processing is less frequent but still benefits from compilation
+	if p.originalAdvanced != "" {
+		wrappedCode := fmt.Sprintf(`(function(){'use strict';%s})()`, p.originalAdvanced)
+		p.advancedProgram, err = goja.Compile("advanced.js", wrappedCode, false)
+		if err != nil {
+			return fmt.Errorf("failed to compile advanced processing code: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// executeCompiledProgram runs a pre-compiled JS program. Returns (messages, reason, err).
+// reason is the drop label when err != nil; empty for deliberate drops (null/undefined).
+func (p *TagProcessor) executeCompiledProgram(vm *goja.Runtime, program *goja.Program, jsMsg map[string]any, stageName string) ([]map[string]any, string, error) {
+	if program == nil {
+		return nil, "", nil
+	}
+
+	result, err := vm.RunProgram(program)
+	if err != nil {
+		// Use original code for error logging context
+		var originalCode string
+		switch stageName {
+		case "defaults":
+			originalCode = p.originalDefaults
+		case "advanced":
+			originalCode = p.originalAdvanced
+		default:
+			originalCode = fmt.Sprintf("compiled program: %s", stageName)
+		}
+		p.logJSError(err, originalCode, jsMsg)
+		return nil, "js_throw", fmt.Errorf("JavaScript error in %s: %w", stageName, err)
+	}
+
+	if result == nil || goja.IsNull(result) || goja.IsUndefined(result) {
+		return nil, "", nil
+	}
+
+	switch v := result.Export().(type) {
+	case []any:
+		messages := make([]map[string]any, 0, len(v))
+		for i, msg := range v {
+			if msg == nil {
+				continue
+			}
+			msgMap, ok := msg.(map[string]any)
+			if !ok {
+				return nil, "bad_array_element", fmt.Errorf("array element %d must be a message object, got %T", i, msg)
+			}
+			messages = append(messages, msgMap)
+		}
+		return messages, "", nil
+	case map[string]any:
+		return []map[string]any{v}, "", nil
+	default:
+		return nil, "bad_return", fmt.Errorf("code must return a message object or array of message objects")
+	}
+}
+
+// processMessageBatchWithProgram runs a compiled program over a batch.
+// Per-message errors drop via RecordDrop; never returns a non-nil error.
+func (p *TagProcessor) processMessageBatchWithProgram(ctx context.Context, batch service.MessageBatch, program *goja.Program, stageName string) (service.MessageBatch, error) {
+	if program == nil {
+		return batch, nil
+	}
+
+	var resultBatch service.MessageBatch
+	for _, msg := range batch {
+		if msg == nil {
+			continue
+		}
+		resultBatch = append(resultBatch, p.processMessageWithProgram(ctx, msg, program, stageName)...)
+	}
+
+	return resultBatch, nil
+}
+
+// processMessageWithProgram runs a compiled program over a single message.
+// Per-message errors drop via RecordDrop; returns only the good outputs.
+// This is a per-message helper so the deferred putVM fires each call,
+// not once per batch (a defer inside the loop body would hold every VM
+// until processMessageBatchWithProgram returns and starve the pool).
+func (p *TagProcessor) processMessageWithProgram(ctx context.Context, msg *service.Message, program *goja.Program, stageName string) []*service.Message {
+	vm := p.getVM()
+	defer p.putVM(vm)
+
+	// Convert message to JS object
+	// defensive: AsBytes never errors as of benthos v4.74.0 (TODO upstream); kept for future-proofing
+	jsMsg, err := nodered_js_plugin.ConvertMessageToJSObject(msg)
+	if err != nil {
+		nodered_js_plugin.RecordDrop(p.messagesDropped, p.logger, "infra_failed", "tag_processor", stageName, msg, err)
+		return nil
+	}
+
+	// Setup VM environment
+	// defensive: MetaWalkMut callback + vm.Set unreachable from normal messages; kept for future-proofing
+	if err = p.setupMessageForVM(ctx, vm, msg, jsMsg); err != nil {
+		nodered_js_plugin.RecordDrop(p.messagesDropped, p.logger, "infra_failed", "tag_processor", stageName, msg, err)
+		return nil
+	}
+
+	// Execute compiled program for maximum performance
+	messages, reason, err := p.executeCompiledProgram(vm, program, jsMsg, stageName)
+	if err != nil {
+		nodered_js_plugin.RecordDrop(p.messagesDropped, p.logger, reason, "tag_processor", stageName, msg, err)
+		return nil
+	}
+
+	// 0 outputs (null/undefined/empty/all-nil array) = deliberate drop.
+	if len(messages) == 0 {
+		p.messagesDropped.Incr(1, "deliberate")
+		return nil
+	}
+
+	// Convert results back to Benthos messages
+	out := make([]*service.Message, 0, len(messages))
+	for _, resultMsg := range messages {
+		// NewMessage(nil) is safe: the engine wrapper (v2BatchedToV1Processor) restores input context onto outputs.
+		newMsg := service.NewMessage(nil)
+		// Share nodered_js's SetMetaFromJS so nested-nil meta serializes as JSON, not Go <nil>.
+		if meta, exists := resultMsg["meta"]; exists && meta != nil {
+			metaMap, ok := meta.(map[string]any)
+			if !ok {
+				nodered_js_plugin.RecordDrop(p.messagesDropped, p.logger, "bad_return", "tag_processor", stageName, msg, fmt.Errorf("message meta must be an object, got %T", meta))
+				continue
+			}
+			nodered_js_plugin.SetMetaFromJS(newMsg, metaMap)
+		}
+		// Set payload
+		if payload, exists := resultMsg["payload"]; exists {
+			newMsg.SetStructured(payload)
+		} else {
+			newMsg.SetStructured(jsMsg["payload"])
+		}
+		out = append(out, newMsg)
+	}
+	return out
+}
+
+// processConditionForMessageWithProgram evaluates a condition with compiled programs.
+// Returns (batch, reason, stage, err); reason/stage populated for RecordDrop on error.
+func (p *TagProcessor) processConditionForMessageWithProgram(ctx context.Context, conditionIndex int, msg *service.Message) (service.MessageBatch, string, string, error) {
+	// Get VM from pool and ensure it's returned
+	vm := p.getVM()
+	defer p.putVM(vm)
+
+	// Convert message to JS object for condition check
+	// defensive: AsBytes never errors as of benthos v4.74.0 (TODO upstream); kept for future-proofing
+	jsMsg, err := nodered_js_plugin.ConvertMessageToJSObject(msg)
+	if err != nil {
+		return nil, "infra_failed", "condition-if", fmt.Errorf("message conversion failed: %w", err)
+	}
+
+	// Setup VM environment using optimized helper method
+	// defensive: MetaWalkMut callback + vm.Set unreachable from normal messages; kept for future-proofing
+	if err = p.setupMessageForVM(ctx, vm, msg, jsMsg); err != nil {
+		return nil, "infra_failed", "condition-if", fmt.Errorf("JS environment setup failed: %w", err)
+	}
+
+	// Evaluate condition using compiled program
+	ifResult, err := vm.RunProgram(p.conditionPrograms[conditionIndex])
+	if err != nil {
+		p.logJSError(err, p.originalConditions[conditionIndex].If, jsMsg)
+		return nil, "js_throw", "condition-if", fmt.Errorf("condition evaluation failed: %w", err)
+	}
+
+	// If condition is true, process the message with the compiled condition action
+	if ifResult.ToBoolean() {
+		conditionBatch, _ := p.processMessageBatchWithProgram(
+			ctx,
+			service.MessageBatch{msg},
+			p.conditionThenPrograms[conditionIndex],
+			"condition-then",
+		)
+		// Return all messages produced by the condition action (could be 0, 1, or multiple)
+		return conditionBatch, "", "", nil
+	}
+
+	// Condition was false, return original message
+	return service.MessageBatch{msg}, "", "", nil
+}

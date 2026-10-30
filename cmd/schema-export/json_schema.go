@@ -1,0 +1,345 @@
+// Copyright 2025 UMH Systems GmbH
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"sort"
+)
+
+// orderedMap serializes its keys in insertion order, preserving Go struct field declaration order.
+// Use set() to add entries; MarshalJSON emits them in the order they were inserted.
+type orderedMap struct {
+	keys []string
+	m    map[string]interface{}
+}
+
+func newOrderedMap() *orderedMap {
+	return &orderedMap{m: make(map[string]interface{})}
+}
+
+func (o *orderedMap) set(key string, val interface{}) {
+	if _, exists := o.m[key]; !exists {
+		o.keys = append(o.keys, key)
+	}
+	o.m[key] = val
+}
+
+// asMap returns the underlying map for use in tests and non-order-sensitive lookups.
+func (o *orderedMap) asMap() map[string]interface{} {
+	return o.m
+}
+
+func (o *orderedMap) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, key := range o.keys {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		keyBytes, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(keyBytes)
+		buf.WriteByte(':')
+		valBytes, err := json.Marshal(o.m[key])
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(valBytes)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+// validateFormat validates the format flag value
+func validateFormat(format string) error {
+	switch format {
+	case "benthos", "json-schema", "mapping":
+		return nil
+	case "":
+		return fmt.Errorf("format cannot be empty")
+	default:
+		return fmt.Errorf("invalid format: %s (must be 'benthos', 'json-schema', or 'mapping')", format)
+	}
+}
+
+// mapBenthosBaseType converts a Benthos type string to JSON Schema type string.
+// Handles primitive types, structural types (object, array), and component
+// reference types (input, output, processor, scanner) which map to "object".
+// Returns the mapped type and whether the type was recognized.
+func mapBenthosBaseType(t string) (string, bool) {
+	switch t {
+	case "string":
+		return "string", true
+	case "int", "float", "number":
+		return "number", true
+	case "bool":
+		return "boolean", true
+	case "object":
+		return "object", true
+	case "array":
+		return "array", true
+	case "input", "output", "processor", "scanner":
+		return "object", true
+	default:
+		fmt.Fprintf(os.Stderr, "warning: unrecognized Benthos type %q, producing unconstrained schema\n", t)
+		return "", false
+	}
+}
+
+// benthosTypeToJSONSchemaType converts a Benthos type to JSON Schema type.
+// It handles the distinction between "type" (element type) and "kind" (container type).
+// For arrays, Benthos reports kind="array" with type being the element type (e.g., "int", "string", "object").
+// For maps, Benthos reports kind="map" with type being the value type (e.g., "string" for headers).
+// For unrecognized types, returns an empty schema (unconstrained — any JSON value is valid).
+func benthosTypeToJSONSchemaType(benthosType string, kind string) map[string]interface{} {
+	result := make(map[string]interface{})
+	baseType, known := mapBenthosBaseType(benthosType)
+
+	if kind == "map" {
+		result["type"] = "object"
+		if !known {
+			result["additionalProperties"] = map[string]any{}
+		} else {
+			result["additionalProperties"] = map[string]any{
+				"type": baseType,
+			}
+		}
+		return result
+	}
+
+	if kind == "array" {
+		result["type"] = "array"
+		if !known {
+			result["items"] = map[string]any{}
+		} else {
+			result["items"] = map[string]any{
+				"type": baseType,
+			}
+		}
+		return result
+	}
+
+	if !known {
+		return result
+	}
+
+	result["type"] = baseType
+	return result
+}
+
+// convertFieldToJSONSchema converts a FieldSpec to a JSON Schema property
+func convertFieldToJSONSchema(field FieldSpec) map[string]interface{} {
+	schema := benthosTypeToJSONSchemaType(field.Type, field.Kind)
+
+	// Add description
+	if field.Description != "" {
+		schema["description"] = field.Description
+	}
+
+	// Add default value
+	if field.Default != nil {
+		schema["default"] = field.Default
+	}
+
+	// Add enum options
+	if len(field.Options) > 0 {
+		schema["enum"] = field.Options
+	}
+
+	// Add advanced flag as custom property
+	if field.Advanced {
+		schema["x-advanced"] = true
+	}
+
+	// Add deprecated flag
+	if field.Deprecated {
+		schema["x-deprecated"] = true
+	}
+
+	// Handle object arrays with children (e.g., modbus addresses: type="object", kind="array")
+	// Properties go INSIDE items, not at top level
+	if field.Kind == "array" && field.Type == "object" && len(field.Children) > 0 {
+		properties := newOrderedMap()
+		for _, child := range field.Children {
+			properties.set(child.Name, convertFieldToJSONSchema(child))
+		}
+
+		// Get the items map and add properties to it
+		items, ok := schema["items"].(map[string]interface{})
+		if !ok {
+			items = map[string]any{}
+			schema["items"] = items
+		}
+		items["properties"] = properties
+
+		// Build required array for the items object
+		required := make([]string, 0)
+		for _, child := range field.Children {
+			if child.Required {
+				required = append(required, child.Name)
+			}
+		}
+		sort.Strings(required)
+		if len(required) > 0 {
+			items["required"] = required
+		}
+		// Prevent unknown properties in array item objects
+		items["additionalProperties"] = false
+		return schema
+	}
+
+	// Handle nested object fields (non-array, non-map objects with children)
+	if field.Type == "object" && field.Kind != "array" && field.Kind != "map" && len(field.Children) > 0 {
+		properties := newOrderedMap()
+		for _, child := range field.Children {
+			properties.set(child.Name, convertFieldToJSONSchema(child))
+		}
+		schema["properties"] = properties
+
+		// Build required array for nested object
+		required := make([]string, 0)
+		for _, child := range field.Children {
+			if child.Required {
+				required = append(required, child.Name)
+			}
+		}
+		sort.Strings(required)
+		if len(required) > 0 {
+			schema["required"] = required
+		}
+		// Prevent unknown properties in nested objects
+		schema["additionalProperties"] = false
+	}
+
+	// Handle array fields where type="array" (not kind="array")
+	if field.Type == "array" && field.Kind != "map" && len(field.Children) > 0 {
+		// For arrays, the first child defines the items schema
+		schema["items"] = convertFieldToJSONSchema(field.Children[0])
+	}
+
+	return schema
+}
+
+// buildRequiredArray extracts required field names from a field map
+func buildRequiredArray(fields map[string]FieldSpec) []string {
+	required := make([]string, 0)
+	for name, field := range fields {
+		if field.Required {
+			required = append(required, name)
+		}
+	}
+	sort.Strings(required)
+	return required
+}
+
+// generateJSONSchema converts plugin specs to JSON Schema Draft-07 format.
+// This output is designed for Monaco JSON editor validation/autocomplete.
+// Unlike "benthos" format which preserves UMH-specific fields (source, summary),
+// JSON Schema uses standardized properties ($schema, definitions, properties).
+func generateJSONSchema(plugins *SchemaOutput, version string) (map[string]interface{}, error) {
+	schema := map[string]interface{}{
+		"$schema":     "http://json-schema.org/draft-07/schema#",
+		"$id":         fmt.Sprintf("https://github.com/united-manufacturing-hub/benthos-umh/schemas/benthos-v%s.json", version),
+		"title":       "Benthos UMH Configuration Schema",
+		"description": "JSON Schema for Benthos UMH protocol plugins",
+	}
+
+	definitions := make(map[string]interface{})
+
+	// Convert input plugins with "input_" prefix
+	for name, plugin := range plugins.Inputs {
+		definitions["input_"+name] = convertPluginToJSONSchema(plugin)
+	}
+
+	// Convert processor plugins with "processor_" prefix
+	for name, plugin := range plugins.Processors {
+		definitions["processor_"+name] = convertPluginToJSONSchema(plugin)
+	}
+
+	// Convert output plugins with "output_" prefix
+	for name, plugin := range plugins.Outputs {
+		definitions["output_"+name] = convertPluginToJSONSchema(plugin)
+	}
+
+	schema["definitions"] = definitions
+
+	return schema, nil
+}
+
+// convertPluginToJSONSchema converts a PluginSpec to a JSON Schema definition
+func convertPluginToJSONSchema(plugin PluginSpec) map[string]any {
+	// Plugins only inline values (e.g. bloblang) are typed string instead of object.
+	schema := map[string]any{"type": "object"}
+	if plugin.RootType != "" {
+		schema = benthosTypeToJSONSchemaType(plugin.RootType, plugin.RootKind)
+	}
+
+	// Add description
+	if plugin.Description != "" {
+		schema["description"] = plugin.Description
+	} else if plugin.Summary != "" {
+		schema["description"] = plugin.Summary
+	}
+
+	if schema["type"] != "object" {
+		return schema
+	}
+
+	// Convert config fields to properties, preserving Go struct declaration order via FieldOrder.
+	properties := newOrderedMap()
+	for _, name := range plugin.FieldOrder {
+		if field, ok := plugin.Config[name]; ok {
+			properties.set(name, convertFieldToJSONSchema(field))
+		}
+	}
+
+	if len(properties.keys) > 0 {
+		schema["properties"] = properties
+	}
+
+	// Build required array
+	required := buildRequiredArray(plugin.Config)
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+
+	// Prevent unknown properties at plugin root level
+	schema["additionalProperties"] = false
+
+	return schema
+}
+
+// generateSchemaWithFormat routes to the appropriate formatter:
+// - format="benthos": Returns raw SchemaOutput (UI format) for Management Console
+// - format="json-schema": Returns JSON Schema Draft-07 (Monaco format) for editors
+func generateSchemaWithFormat(plugins *SchemaOutput, format string, version string) (interface{}, error) {
+	if err := validateFormat(format); err != nil {
+		return nil, err
+	}
+
+	if format == "benthos" {
+		// Return the original Benthos format
+		return plugins, nil
+	}
+
+	// Generate JSON Schema format
+	return generateJSONSchema(plugins, version)
+}
