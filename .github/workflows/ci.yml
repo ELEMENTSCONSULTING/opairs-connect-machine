@@ -1,5 +1,6 @@
 # CI: Image bauen, Pipelines pruefen, kompletten Stack mit Selbsttest starten
 # und die SQL-Regressionstests ausfuehren.
+# Fehlerausgaben erscheinen zusaetzlich als Annotation (scripts/ci-run.sh).
 name: ci
 
 on:
@@ -15,24 +16,26 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  BUILDKIT_PROGRESS: plain
+
 jobs:
   stack:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Testkonfiguration
         run: cp .env.example .env
 
       - name: Image bauen
-        run: docker compose build connector
+        run: scripts/ci-run.sh "Image-Build" docker compose build connector
 
       - name: Pipelines pruefen (benthos lint)
         run: |
           for f in pipelines/*.yaml; do
-            echo "lint $f"
-            docker run --rm \
+            scripts/ci-run.sh "Lint $(basename "$f")" docker run --rm \
               -e POSTGRES_DSN=postgres://u:p@db:5432/opairs \
               -e MACHINE_NAME=ci -e OPCUA_ENDPOINT=opc.tcp://localhost:4840 \
               -v "$PWD/pipelines:/p:ro" \
@@ -40,11 +43,11 @@ jobs:
           done
 
       - name: Smoke-Test und SQL-Tests
-        run: ./scripts/smoke-test.sh
+        run: scripts/ci-run.sh "Smoke-Test" ./scripts/smoke-test.sh
 
       - name: Logs bei Fehler
         if: failure()
-        run: docker compose logs --no-color
+        run: scripts/ci-run.sh "Container-Logs" sh -c 'docker compose logs --no-color --tail=40; exit 1' || true
 
       - name: Aufraeumen
         if: always()
