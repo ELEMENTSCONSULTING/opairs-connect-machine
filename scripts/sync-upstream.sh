@@ -35,7 +35,8 @@ git -C "$tmp/up" diff --binary "$OLD" "$NEW" -- . \
     ':(exclude).coderabbit.yaml' ':(exclude)renovate.json' \
     ':(exclude)CONTRIBUTOR_LICENSE_AGREEMENT_ENTITY.md' \
     ':(exclude)CONTRIBUTOR_LICENSE_AGREEMENT_INDIVIDUAL.md' \
-  | sed -E '/^(diff --git|--- |\+\+\+ )/ s#([ab])/README\.md#\1/README.upstream.md#g' \
+  | sed -E -e 's#^(diff --git a/)README\.md( b/)README\.md$#\1README.upstream.md\2README.upstream.md#' \
+           -e 's#^((---|\+\+\+) [ab]/)README\.md$#\1README.upstream.md#' \
   > "$tmp/upstream.patch"
 
 if [ ! -s "$tmp/upstream.patch" ]; then

@@ -54,21 +54,66 @@ CREATE TABLE IF NOT EXISTS opairs.machine_data_1min (
 CREATE INDEX IF NOT EXISTS machine_data_1min_bucket_idx
     ON opairs.machine_data_1min (bucket);
 
--- Partitionen im Voraus anlegen und alte Rohdaten-Partitionen loeschen.
+-- Tagespartition (UTC) anlegen. Zeilen dieses Tages, die schon in der
+-- Default-Partition liegen, werden verschoben. Dafuer wird die Elterntabelle
+-- kurz exklusiv gesperrt, damit der Connector nicht zwischen Verschieben und
+-- Anlegen neue Zeilen in die Default-Partition schreibt. Die Sperre gilt bis
+-- Transaktionsende; maintain_partitions deshalb in einer eigenen Transaktion
+-- aufrufen (so macht es der Wartungs-Container).
+CREATE OR REPLACE FUNCTION opairs.create_day_partition(d date)
+RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    part_name text        := 'machine_data_' || to_char(d, 'YYYYMMDD');
+    lo        timestamptz := d::timestamp AT TIME ZONE 'UTC';
+    hi        timestamptz := (d + 1)::timestamp AT TIME ZONE 'UTC';
+BEGIN
+    IF to_regclass(format('opairs.%I', part_name)) IS NOT NULL THEN
+        RETURN false;
+    END IF;
+
+    -- Nicht endlos auf die Sperre warten (z. B. lange Superset-Abfrage):
+    -- dann scheitert dieser Lauf, der naechste versucht es erneut.
+    PERFORM set_config('lock_timeout', '10s', true);
+    LOCK TABLE opairs.machine_data IN ACCESS EXCLUSIVE MODE;
+
+    IF to_regclass('pg_temp._opairs_moved') IS NULL THEN
+        CREATE TEMP TABLE _opairs_moved (LIKE opairs.machine_data) ON COMMIT DROP;
+    ELSE
+        TRUNCATE _opairs_moved;
+    END IF;
+
+    WITH m AS (
+        DELETE FROM opairs.machine_data_default
+         WHERE ts >= lo AND ts < hi
+        RETURNING *
+    )
+    INSERT INTO _opairs_moved SELECT * FROM m;
+
+    EXECUTE format(
+        'CREATE TABLE opairs.%I PARTITION OF opairs.machine_data '
+        'FOR VALUES FROM (%L) TO (%L)', part_name, lo, hi);
+
+    INSERT INTO opairs.machine_data SELECT * FROM _opairs_moved;
+    TRUNCATE _opairs_moved;
+    RETURN true;
+END;
+$$;
+
+-- Partitionen anlegen und (nur wenn raw_retention angegeben ist) alte
+-- Rohdaten loeschen. raw_retention = NULL loescht nichts.
 CREATE OR REPLACE FUNCTION opairs.maintain_partitions(
     ahead_days    integer  DEFAULT 7,
-    raw_retention interval DEFAULT interval '30 days'
+    raw_retention interval DEFAULT NULL
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    today     date := (now() AT TIME ZONE 'UTC')::date;
-    cutoff    date := ((now() - raw_retention) AT TIME ZONE 'UTC')::date;
-    d         date;
-    part_name text;
-    lo        timestamptz;
-    hi        timestamptz;
-    r         record;
+    today  date := (now() AT TIME ZONE 'UTC')::date;
+    cutoff date;
+    d      date;
+    r      record;
 BEGIN
     -- Nur eine Wartung gleichzeitig (Sperre gilt bis Transaktionsende).
     IF NOT pg_try_advisory_xact_lock(hashtext('opairs.maintenance')) THEN
@@ -76,55 +121,53 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 1) Partitionen fuer gestern bis heute + ahead_days anlegen.
+    IF raw_retention IS NOT NULL THEN
+        IF raw_retention < interval '1 day' THEN
+            RAISE EXCEPTION 'opairs: raw_retention muss mindestens 1 Tag sein (%)', raw_retention;
+        END IF;
+        cutoff := ((now() - raw_retention) AT TIME ZONE 'UTC')::date;
+    END IF;
+
+    -- 1) Partitionen fuer gestern bis heute + ahead_days.
     FOR i IN -1..ahead_days LOOP
-        d := today + i;
-        part_name := 'machine_data_' || to_char(d, 'YYYYMMDD');
-
-        IF to_regclass(format('opairs.%I', part_name)) IS NULL THEN
-            lo := d::timestamp AT TIME ZONE 'UTC';
-            hi := (d + 1)::timestamp AT TIME ZONE 'UTC';
-
-            -- Zeilen, die schon in der Default-Partition liegen, muessen
-            -- vor dem Anlegen verschoben werden (sonst lehnt Postgres ab).
-            IF to_regclass('pg_temp._opairs_moved') IS NULL THEN
-                CREATE TEMP TABLE _opairs_moved
-                    (LIKE opairs.machine_data) ON COMMIT DROP;
-            ELSE
-                TRUNCATE _opairs_moved;
-            END IF;
-
-            WITH m AS (
-                DELETE FROM opairs.machine_data_default
-                 WHERE ts >= lo AND ts < hi
-                RETURNING *
-            )
-            INSERT INTO _opairs_moved SELECT * FROM m;
-
-            EXECUTE format(
-                'CREATE TABLE opairs.%I PARTITION OF opairs.machine_data '
-                'FOR VALUES FROM (%L) TO (%L)', part_name, lo, hi);
-
-            INSERT INTO opairs.machine_data SELECT * FROM _opairs_moved;
-            TRUNCATE _opairs_moved;
-        END IF;
+        PERFORM opairs.create_day_partition(today + i);
     END LOOP;
 
-    -- 2) Rohdaten-Partitionen loeschen, die komplett vor dem Stichtag liegen.
-    FOR r IN
-        SELECT c.relname
-          FROM pg_inherits i
-          JOIN pg_class c     ON c.oid = i.inhrelid
-          JOIN pg_class p     ON p.oid = i.inhparent
-          JOIN pg_namespace n ON n.oid = p.relnamespace
-         WHERE n.nspname = 'opairs'
-           AND p.relname = 'machine_data'
-           AND c.relname ~ '^machine_data_[0-9]{8}$'
+    -- 2) Tage, fuer die Zeilen in der Default-Partition liegen (Quelle mit
+    --    falscher Uhr, laengerer Wartungsausfall), bekommen ebenfalls eine
+    --    Partition, sofern sie nicht unter die Aufbewahrung fallen und nicht
+    --    mehr als ein Jahr in der Zukunft liegen.
+    FOR d IN
+        SELECT DISTINCT (ts AT TIME ZONE 'UTC')::date
+          FROM opairs.machine_data_default
+         ORDER BY 1
     LOOP
-        IF to_date(substr(r.relname, 14), 'YYYYMMDD') < cutoff THEN
-            EXECUTE format('DROP TABLE opairs.%I', r.relname);
+        IF (cutoff IS NULL OR d >= cutoff) AND d <= today + 366 THEN
+            PERFORM opairs.create_day_partition(d);
         END IF;
     END LOOP;
+
+    -- 3) Aufbewahrung: Partitionen komplett vor dem Stichtag loeschen,
+    --    ebenso alte Zeilen in der Default-Partition.
+    IF cutoff IS NOT NULL THEN
+        FOR r IN
+            SELECT c.relname
+              FROM pg_inherits i
+              JOIN pg_class c     ON c.oid = i.inhrelid
+              JOIN pg_class p     ON p.oid = i.inhparent
+              JOIN pg_namespace n ON n.oid = p.relnamespace
+             WHERE n.nspname = 'opairs'
+               AND p.relname = 'machine_data'
+               AND c.relname ~ '^machine_data_[0-9]{8}$'
+        LOOP
+            IF to_date(substr(r.relname, 14), 'YYYYMMDD') < cutoff THEN
+                EXECUTE format('DROP TABLE opairs.%I', r.relname);
+            END IF;
+        END LOOP;
+
+        DELETE FROM opairs.machine_data_default
+         WHERE ts < cutoff::timestamp AT TIME ZONE 'UTC';
+    END IF;
 END;
 $$;
 
@@ -146,6 +189,12 @@ DECLARE
     end_ts      timestamptz := date_trunc('minute', now()) + interval '1 minute';
     last_bucket timestamptz;
 BEGIN
+    -- Nur eine Aggregation gleichzeitig.
+    IF NOT pg_try_advisory_xact_lock(hashtext('opairs.aggregate')) THEN
+        RAISE NOTICE 'opairs: Aggregation laeuft bereits, uebersprungen';
+        RETURN 0;
+    END IF;
+
     SELECT max(bucket) INTO last_bucket
       FROM opairs.machine_data_1min
      WHERE bucket < end_ts;
@@ -174,22 +223,34 @@ BEGIN
 END;
 $$;
 
--- Alles in einem Aufruf (wird vom Wartungs-Container alle 5 Minuten ausgefuehrt).
+-- Alte Minutenwerte loeschen.
+CREATE OR REPLACE FUNCTION opairs.purge_aggregates(
+    agg_retention interval DEFAULT interval '400 days'
+) RETURNS bigint
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    n bigint;
+BEGIN
+    DELETE FROM opairs.machine_data_1min WHERE bucket < now() - agg_retention;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    RETURN n;
+END;
+$$;
+
+-- Alles in einem Aufruf (fuer manuelle Laeufe und Tests). Der Wartungs-
+-- Container ruft die drei Schritte stattdessen in getrennten Transaktionen
+-- auf, damit die kurze Tabellensperre beim Anlegen einer Partition nicht bis
+-- zum Ende der Aggregation gehalten wird.
 CREATE OR REPLACE FUNCTION opairs.run_maintenance(
-    raw_retention_days  integer DEFAULT 30,
-    agg_retention_days  integer DEFAULT 400,
-    ahead_days          integer DEFAULT 7,
+    raw_retention_days   integer DEFAULT 30,
+    agg_retention_days   integer DEFAULT 400,
+    ahead_days           integer DEFAULT 7,
     agg_lookback_minutes integer DEFAULT 120
 ) RETURNS void
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Nur eine Wartung gleichzeitig (gleiche Sperre wie in maintain_partitions).
-    IF NOT pg_try_advisory_xact_lock(hashtext('opairs.maintenance')) THEN
-        RAISE NOTICE 'opairs: Wartung laeuft bereits, uebersprungen';
-        RETURN;
-    END IF;
-
     IF raw_retention_days * 24 * 60 <= agg_lookback_minutes THEN
         RAISE EXCEPTION 'opairs: raw_retention_days (%) muss laenger sein als agg_lookback_minutes (%)',
             raw_retention_days, agg_lookback_minutes;
@@ -197,8 +258,7 @@ BEGIN
 
     PERFORM opairs.maintain_partitions(ahead_days, make_interval(days => raw_retention_days));
     PERFORM opairs.aggregate_1min(make_interval(mins => agg_lookback_minutes));
-    DELETE FROM opairs.machine_data_1min
-     WHERE bucket < now() - make_interval(days => agg_retention_days);
+    PERFORM opairs.purge_aggregates(make_interval(days => agg_retention_days));
 END;
 $$;
 
@@ -210,5 +270,7 @@ SELECT DISTINCT ON (machine, tag)
  WHERE bucket > now() - interval '24 hours'
  ORDER BY machine, tag, bucket DESC;
 
--- Erste Partitionen sofort anlegen, damit der Connector ab dem Start schreiben kann.
-SELECT opairs.maintain_partitions();
+-- Partitionen sofort anlegen, damit der Connector ab dem Start schreiben kann.
+-- Bewusst OHNE Aufbewahrung: diese Datei laeuft bei jedem Start der Wartung,
+-- geloescht wird nur im regulaeren Lauf mit der konfigurierten Frist.
+SELECT opairs.maintain_partitions(raw_retention => NULL);

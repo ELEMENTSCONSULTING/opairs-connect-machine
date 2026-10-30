@@ -51,7 +51,8 @@ Die CI laeuft nur, wenn GitHub Actions fuer das Repository aktiviert ist
 | `opairs.machine_data_default` | Sicherheitsnetz, falls eine Tagespartition fehlt (wird bei der Wartung aufgeloest) |
 | `opairs.machine_data_1min` | Minutenwerte (avg/min/max/Anzahl) fuer Dashboards |
 | `opairs.v_latest_1min` | letzter Minutenwert je Maschine und Tag (letzte 24 h) |
-| `opairs.run_maintenance()` | legt Partitionen an, loescht alte Rohdaten, berechnet Minutenwerte |
+| `opairs.maintain_partitions()`, `aggregate_1min()`, `purge_aggregates()` | Wartungsschritte (siehe unten) |
+| `opairs.run_maintenance()` | alle Wartungsschritte in einem Aufruf |
 
 Indizes: `(machine, tag, ts)` fuer Abfragen je Tag, BRIN auf `ts` fuer
 Zeitbereiche, `bucket` auf den Minutenwerten.
@@ -69,14 +70,25 @@ Der Container `maintenance`
 
 1. wendet beim Start `sql/001_schema.sql` an (die Datei ist idempotent, so
    kommen Schema-Aenderungen nach einem Update automatisch in die Datenbank),
-2. ruft danach alle 5 Minuten `run_maintenance()` auf: Partitionen 7 Tage im
-   Voraus anlegen, Rohdaten aelter als `RAW_RETENTION_DAYS` (Standard 30)
-   loeschen, Minutenwerte berechnen, Minutenwerte aelter als
-   `AGG_RETENTION_DAYS` (Standard 400) loeschen.
+2. fuehrt danach alle 5 Minuten drei Schritte in getrennten Transaktionen aus:
+   - `maintain_partitions`: Partitionen 7 Tage im Voraus anlegen, Rohdaten
+     aelter als `RAW_RETENTION_DAYS` (Standard 30) loeschen
+   - `aggregate_1min`: Minutenwerte berechnen
+   - `purge_aggregates`: Minutenwerte aelter als `AGG_RETENTION_DAYS`
+     (Standard 400) loeschen
 
-Faellt die Wartung aus, holt die Aggregation beim naechsten Lauf auf
-(hoechstens 7 Tage zurueck). Zwei gleichzeitige Wartungslaeufe sind per
-Sperre ausgeschlossen.
+Geloescht wird nur in diesem regulaeren Lauf. Das Anwenden des Schemas beim
+Start legt nur Partitionen an und loescht nie Daten.
+
+Faellt die Wartung aus, landen neue Zeilen in der Default-Partition. Der
+naechste Lauf legt die fehlenden Tagespartitionen an und verschiebt die Zeilen
+dorthin; dabei wird die Tabelle kurz exklusiv gesperrt (hoechstens 10 s
+Wartezeit, sonst erneuter Versuch im naechsten Lauf). Die Aggregation holt
+ebenfalls auf (hoechstens 7 Tage zurueck). Gleichzeitige Wartungslaeufe sind
+per Sperre ausgeschlossen.
+
+`SELECT opairs.run_maintenance();` fuehrt alle Schritte in einem Aufruf aus
+(fuer manuelle Laeufe und Tests).
 
 Die Rollen (`sql/002_roles.sh`) werden nur bei der Erstinitialisierung der
 Datenbank angelegt.

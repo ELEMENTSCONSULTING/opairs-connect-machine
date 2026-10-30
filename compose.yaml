@@ -88,9 +88,14 @@ services:
           sleep 10
         done
         echo "opairs: Schema aktuell, Wartung startet"
+        # Jeder Schritt in eigener Transaktion: ein Fehler in einem Schritt
+        # haelt die anderen nicht auf, und die kurze Tabellensperre beim
+        # Anlegen einer Partition endet sofort danach.
+        step() { psql -q -v ON_ERROR_STOP=1 -c "$$1" >/dev/null || echo "opairs: fehlgeschlagen: $$1"; }
         while true; do
-          psql -q -v ON_ERROR_STOP=1 -c "SELECT opairs.run_maintenance(raw_retention_days => $${RAW_RETENTION_DAYS}, agg_retention_days => $${AGG_RETENTION_DAYS})" >/dev/null \
-            || echo "opairs: Wartung fehlgeschlagen, naechster Versuch in 5 Minuten"
+          step "SELECT opairs.maintain_partitions(ahead_days => 7, raw_retention => make_interval(days => $${RAW_RETENTION_DAYS}))"
+          step "SELECT opairs.aggregate_1min()"
+          step "SELECT opairs.purge_aggregates(make_interval(days => $${AGG_RETENTION_DAYS}))"
           sleep 300
         done
 

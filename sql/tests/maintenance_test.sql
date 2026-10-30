@@ -39,6 +39,48 @@ BEGIN
     END IF;
 END $$;
 
+-- 2b) Ohne Aufbewahrungsfrist wird nichts geloescht (Schema-Start darf keine
+--     Daten loeschen, auch wenn RAW_RETENTION_DAYS > 30 konfiguriert ist)
+SELECT opairs.create_day_partition((now() AT TIME ZONE 'UTC')::date - 40);
+SELECT opairs.maintain_partitions();
+SELECT opairs.maintain_partitions(raw_retention => NULL);
+DO $$
+BEGIN
+    IF to_regclass('opairs.machine_data_' || to_char((now() AT TIME ZONE 'UTC')::date - 40, 'YYYYMMDD')) IS NULL THEN
+        RAISE EXCEPTION 'TEST 2b: Partition ohne Aufbewahrungsfrist geloescht';
+    END IF;
+END $$;
+
+-- 2c) Default-Partition: Zeilen vergangener Tage bekommen eine Partition,
+--     Zeilen vor dem Stichtag werden geloescht
+DO $$
+DECLARE
+    d5  date := (now() AT TIME ZONE 'UTC')::date - 5;
+    d60 date := (now() AT TIME ZONE 'UTC')::date - 60;
+BEGIN
+    IF to_regclass('opairs.machine_data_' || to_char(d5, 'YYYYMMDD')) IS NOT NULL
+       OR to_regclass('opairs.machine_data_' || to_char(d60, 'YYYYMMDD')) IS NOT NULL THEN
+        RAISE NOTICE 'TEST 2c uebersprungen: Partitionen existieren schon';
+        RETURN;
+    END IF;
+    INSERT INTO opairs.machine_data (ts, machine, tag, value) VALUES
+        (d5::timestamp  AT TIME ZONE 'UTC' + interval '12 hours', '__test__', 'late', 1),
+        (d60::timestamp AT TIME ZONE 'UTC' + interval '12 hours', '__test__', 'ancient', 1);
+    PERFORM opairs.maintain_partitions(raw_retention => interval '30 days');
+    IF to_regclass('opairs.machine_data_' || to_char(d5, 'YYYYMMDD')) IS NULL THEN
+        RAISE EXCEPTION 'TEST 2c: keine Partition fuer verspaeteten Tag angelegt';
+    END IF;
+    IF EXISTS (SELECT 1 FROM opairs.machine_data_default WHERE machine = '__test__') THEN
+        RAISE EXCEPTION 'TEST 2c: Zeilen in der Default-Partition uebrig';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM opairs.machine_data WHERE machine = '__test__' AND tag = 'late') THEN
+        RAISE EXCEPTION 'TEST 2c: verspaetete Zeile verloren';
+    END IF;
+    IF EXISTS (SELECT 1 FROM opairs.machine_data WHERE machine = '__test__' AND tag = 'ancient') THEN
+        RAISE EXCEPTION 'TEST 2c: Zeile vor dem Stichtag nicht geloescht';
+    END IF;
+END $$;
+
 -- 3) Alte Partitionen werden geloescht
 CREATE TABLE opairs.machine_data_20200101 PARTITION OF opairs.machine_data
     FOR VALUES FROM ('2020-01-01 00:00+00') TO ('2020-01-02 00:00+00');
@@ -49,6 +91,9 @@ DO $$
 BEGIN
     IF to_regclass('opairs.machine_data_20200101') IS NOT NULL THEN
         RAISE EXCEPTION 'TEST 3: alte Partition wurde nicht geloescht';
+    END IF;
+    IF to_regclass('opairs.machine_data_' || to_char((now() AT TIME ZONE 'UTC')::date - 40, 'YYYYMMDD')) IS NOT NULL THEN
+        RAISE EXCEPTION 'TEST 3: 40 Tage alte Partition wurde nicht geloescht';
     END IF;
 END $$;
 

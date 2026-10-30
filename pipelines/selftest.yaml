@@ -15,7 +15,7 @@ pipeline:
   processors:
     - mapping: |
         root.ts = now()
-        root.machine = env("MACHINE_NAME").or("selftest")
+        root.machine = "selftest"
         root.tag = meta("tag")
         root.value = this
         root.value_text = null
