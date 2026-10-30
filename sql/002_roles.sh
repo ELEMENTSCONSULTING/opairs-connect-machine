@@ -3,7 +3,10 @@
 # Wird beim ersten Start der Datenbank vom Postgres-Image ausgefuehrt.
 # Passwoerter kommen aus den Umgebungsvariablen OPAIRS_WRITER_PASSWORD und
 # OPAIRS_READER_PASSWORD (siehe .env.example).
-set -euo pipefail
+# Kein `set -u`: fehlt das Ausfuehrungsrecht (z. B. nach ZIP-Download), wird
+# die Datei vom Postgres-Image per `source` geladen, und -u wuerde dann dessen
+# Startskript beeinflussen.
+set -eo pipefail
 
 : "${OPAIRS_WRITER_PASSWORD:?OPAIRS_WRITER_PASSWORD fehlt}"
 : "${OPAIRS_READER_PASSWORD:?OPAIRS_READER_PASSWORD fehlt}"
