@@ -50,7 +50,7 @@ jobs:
           for f in pipelines/*.yaml; do
             case "$f" in *_benthos_test.yaml) continue;; esac
             scripts/ci-run.sh "Lint $(basename "$f")" docker run --rm \
-              -e POSTGRES_DSN=postgres://u:p@db:5432/opairs \
+              -e POSTGRES_DSN=postgres://u:p@opairs-connect-db:5432/opairs \
               -e MACHINE_NAME=ci -e OPCUA_ENDPOINT=opc.tcp://localhost:4840 \
               -v "$PWD/pipelines:/p:ro" \
               opairs-connect-machine:dev lint "/p/$(basename "$f")"
@@ -59,7 +59,7 @@ jobs:
       - name: Pipeline-Unit-Tests (Mappings)
         run: |
           CI_NOTICE=1 scripts/ci-run.sh "Pipeline-Unit-Tests" docker run --rm \
-            -e POSTGRES_DSN=postgres://u:p@db:5432/opairs \
+            -e POSTGRES_DSN=postgres://u:p@opairs-connect-db:5432/opairs \
             -v "$PWD/pipelines:/p:ro" \
             opairs-connect-machine:dev test /p/...
 
@@ -69,7 +69,7 @@ jobs:
       - name: Demo-Daten (Backfill und Entfernen)
         run: |
           CI_NOTICE=1 scripts/ci-run.sh "Demo-Backfill" ./scripts/demo.sh backfill
-          n=$(docker compose exec -T db psql -U opairs -d opairs -tAc "SELECT count(*) FROM opairs.machine_data_1min WHERE machine LIKE 'demo-%'")
+          n=$(docker compose exec -T opairs-connect-db psql -U opairs -d opairs -tAc "SELECT count(*) FROM opairs.machine_data_1min WHERE machine LIKE 'demo-%'")
           echo "Minutenwerte Demo: $n"
           [ "$n" -gt 20000 ] || { echo "::error title=Demo::zu wenige Minutenwerte ($n)"; exit 1; }
           scripts/ci-run.sh "Demo-Entfernen" ./scripts/demo.sh remove

@@ -12,12 +12,12 @@ cd "$(dirname "$0")/.."
 export PIPELINE=/etc/opairs/pipelines/selftest.yaml
 docker compose up -d --build
 
-q() { docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"' _ "$1"; }
+q() { docker compose exec -T opairs-connect-db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"' _ "$1"; }
 
 fail() {
     echo "FEHLER: $1"
     docker compose ps
-    docker compose logs --no-color --tail=80 connector maintenance db iodd-mirror
+    docker compose logs --no-color --tail=80 connector maintenance opairs-connect-db iodd-mirror
     exit 1
 }
 

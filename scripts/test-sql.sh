@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-docker compose exec -T db sh -c \
+docker compose exec -T opairs-connect-db sh -c \
   'psql -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/tests/maintenance_test.sql' \
   >/dev/null
 echo "SQL-Tests: OK"

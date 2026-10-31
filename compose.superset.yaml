@@ -1,0 +1,25 @@
+# Superset auf demselben Host: Datenbank zusaetzlich in das Docker-Netz von
+# Superset haengen. Superset selbst bleibt unveraendert.
+#
+#   docker inspect superset --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+#   # in .env:
+#   SUPERSET_NETWORK=<Netz von Superset, z. B. docker_db-net>
+#   COMPOSE_FILE=compose.yaml:compose.superset.yaml
+#   docker compose up -d
+#
+# Nutzt der Server auch compose.override.yaml, diese mit angeben:
+#   COMPOSE_FILE=compose.yaml:compose.superset.yaml:compose.override.yaml
+#
+# In Superset als Host "opairs-connect-db", Port 5432 verwenden. Der Name ist
+# bewusst eindeutig: Ein Dienst namens "db" wuerde in einem gemeinsamen Netz
+# mit anderen Datenbanken kollidieren.
+services:
+  opairs-connect-db:
+    networks:
+      default: {}
+      superset: {}
+
+networks:
+  superset:
+    external: true
+    name: ${SUPERSET_NETWORK:?SUPERSET_NETWORK fehlt (.env), siehe compose.superset.yaml}

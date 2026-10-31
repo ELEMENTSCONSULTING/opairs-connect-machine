@@ -145,10 +145,25 @@ docker compose up -d
 SQLAlchemy-URI in Superset:
 `postgresql://opairs_reader:<OPAIRS_READER_PASSWORD>@<IP>:55432/opairs`
 
-**Superset auf demselben Host (Docker):** ohne Portfreigabe, den
-Superset-Container ins Netz des Stacks haengen
-(`docker network connect opairs-connect-machine_default <superset-container>`)
-und als Host `db`, Port `5432` verwenden.
+**Superset auf demselben Host (Docker):** ohne Portfreigabe. Die Datenbank
+kommt zusaetzlich in das Docker-Netz von Superset (`compose.superset.yaml`),
+Superset bleibt unveraendert:
+
+```bash
+docker inspect superset --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+echo "SUPERSET_NETWORK=<Netz von Superset>" >> .env
+echo "COMPOSE_FILE=compose.yaml:compose.superset.yaml" >> .env
+docker compose up -d
+```
+
+Wird auch `compose.override.yaml` genutzt, diese in `COMPOSE_FILE` anhaengen
+(`...:compose.superset.yaml:compose.override.yaml`).
+
+SQLAlchemy-URI in Superset:
+`postgresql://opairs_reader:<OPAIRS_READER_PASSWORD>@opairs-connect-db:5432/opairs`
+
+Der Datenbankdienst heisst bewusst `opairs-connect-db` und nicht `db`: In
+gemeinsam genutzten Netzen gibt es oft schon andere Dienste namens `db`.
 
 ## Demo-Daten
 
