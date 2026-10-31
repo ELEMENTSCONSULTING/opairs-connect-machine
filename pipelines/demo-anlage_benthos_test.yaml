@@ -7,16 +7,16 @@ tests:
       - content: '{}'
     output_batches:
       - - bloblang: |
-          (this.length() == 63) &&
-          (this.map_each(r -> r.machine).unique().length() == 9) &&
-          (this.all(r -> r.machine.has_prefix("demo-") && r.ts.type() == "string" && ["Good", "Uncertain 0x40900000"].contains(r.quality))) &&
-          (this.all(r -> r.value == null || r.value.type() == "number")) &&
-          (this.all(r -> r.value_text == null || r.value_text.type() == "string")) &&
-          (this.filter(r -> r.tag == "pruef_ergebnis").length() == 4 && this.filter(r -> r.tag == "teil_io").length() == 2) &&
-          (this.filter(r -> r.machine == "demo-sgm-02" && r.tag == "werkzeug").index(0).value_text.has_prefix("WZ-200")) &&
-          (this.filter(r -> r.machine == "demo-mon-01").map_each(r -> r.tag).contains("schraub_drehmoment_nm")) &&
-          (this.filter(r -> r.tag == "nio_grund" && r.value_text != null).length() == this.filter(r -> (r.tag == "pruef_ergebnis" || r.tag == "teil_io") && r.value == 0).length()) &&
-          (this.filter(r -> r.tag == "state").all(r -> r.value == 0 || r.value == 1))
+            (this.length() == 63) &&
+            (this.map_each(r -> r.machine).unique().length() == 9) &&
+            (this.all(r -> r.machine.has_prefix("demo-") && r.ts.type() == "string" && ["Good", "Uncertain 0x40900000"].contains(r.quality))) &&
+            (this.all(r -> r.value == null || r.value.type() == "number")) &&
+            (this.all(r -> r.value_text == null || r.value_text.type() == "string")) &&
+            (this.filter(r -> r.tag == "pruef_ergebnis").length() == 4 && this.filter(r -> r.tag == "teil_io").length() == 2) &&
+            (this.filter(r -> r.machine == "demo-sgm-02" && r.tag == "werkzeug").index(0).value_text.has_prefix("WZ-200")) &&
+            (this.filter(r -> r.machine == "demo-mon-01").map_each(r -> r.tag).contains("schraub_drehmoment_nm")) &&
+            (this.filter(r -> r.tag == "nio_grund" && r.value_text != null).length() == this.filter(r -> (r.tag == "pruef_ergebnis" || r.tag == "teil_io") && r.value == 0).length()) &&
+            (this.filter(r -> r.tag == "state").all(r -> r.value == 0 || r.value == 1))
 
   - name: Leerer NiO-Grund wird verworfen, gesetzter bleibt
     target_processors: /pipeline/processors/2
