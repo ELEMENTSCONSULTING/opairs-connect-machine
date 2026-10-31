@@ -1,0 +1,13 @@
+# Datenbank-Port fuer Superset auf einem anderen Host freigeben.
+#
+#   cp compose.override.example.yaml compose.override.yaml
+#   # in .env: DB_BIND_ADDRESS=<IP dieses Servers im internen Netz>, DB_PORT=55432
+#   docker compose up -d
+#
+# compose.override.yaml wird von "docker compose" automatisch geladen und ist
+# nicht eingecheckt. Nur an eine interne Adresse binden (nicht 0.0.0.0) und
+# den Port in der Firewall nur fuer den Superset-Host oeffnen.
+services:
+  db:
+    ports:
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-55432}:5432"

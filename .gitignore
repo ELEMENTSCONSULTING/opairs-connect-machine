@@ -237,3 +237,6 @@ cmd/schema-export/schema-export
 
 .self-review/
 vsdd/
+
+# lokale Compose-Anpassungen (z. B. DB-Port fuer Superset)
+compose.override.yaml

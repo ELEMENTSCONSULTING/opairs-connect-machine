@@ -1,0 +1,177 @@
+# Demo-Anlage fuer Superset-Tests ohne echte Maschine, ein Takt alle 10 s.
+# Gleiches Muster wie sql/demo/demo_backfill.sql (dort 7 Tage Historie).
+#
+#   ./scripts/demo.sh live
+#
+#   demo-cnc-01..03   CNC: state, spindle_speed_rpm, temperature_c, power_kw,
+#                     vibration_mm_s (Spitzen mit quality "Uncertain 0x40900000")
+#   demo-sgm-01..02   Spritzguss: state, status, werkzeug, kavitaeten,
+#                     zykluszeit_s, massetemperatur_c, werkzeugtemperatur_c,
+#                     einspritzdruck_bar, teil_io, nio_grund
+#   demo-mon-01..04   Montage: state, status, taktzeit_s, pruef_ergebnis,
+#                     nio_grund und je Linie zwei Messwerte (Schrauber,
+#                     Dichtheit, Einpressen, Endpruefung)
+#
+# Zeiten UTC. Schicht Mo-Fr 05:00-21:00 (Spritzguss Mo-Fr durchgehend),
+# Montage-Pausen 09:00-09:15 und 13:00-13:30, Stoerungen als 5-Minuten-Bloecke.
+
+input:
+  generate:
+    interval: 10s
+    mapping: 'root = {}'
+
+pipeline:
+  processors:
+    # 0: alle Zeilen eines Takts als Array (feste Anzahl, nio_grund ggf. leer)
+    - mapping: |
+        let ts = now()
+        let e = $ts.ts_unix()
+        let hm = $ts.ts_format("15", "UTC").number() * 60 + $ts.ts_format("04", "UTC").number()
+        let weekday = !["Sat", "Sun"].contains($ts.ts_format("Mon", "UTC"))
+        let schicht = $weekday && $hm >= 300 && $hm <= 1259
+        let pause = ($hm >= 540 && $hm < 555) || ($hm >= 780 && $hm < 810)
+        let block = ($e / 300).floor().int64()
+        let day = ($e / 86400).floor().int64()
+        let tri20 = (2 * (($e % 1200) / 1200.0) - 1).abs()
+        let triday = (2 * (($e % 86400) / 86400.0) - 1).abs()
+        let shiftpos = if $hm > 300 { ($hm - 300) / 960.0 } else { 0 }
+
+        # ---------------- CNC ----------------
+        let cnc = [
+          {"machine": "demo-cnc-01", "seed": 1, "rpm": 8000, "down": 8},
+          {"machine": "demo-cnc-02", "seed": 2, "rpm": 6500, "down": 15},
+          {"machine": "demo-cnc-03", "seed": 3, "rpm": 9500, "down": 4}
+        ].map_each(m -> m.merge({
+          "running": $schicht && (($block * 7919 + m.seed * 104729) % 100) >= m.down,
+          "spike": random_int(max: 9999) < 200
+        }))
+        let cnc_rows = $cnc.map_each(m -> [
+          {"machine": m.machine, "tag": "state", "value": if m.running { 1 } else { 0 }},
+          {"machine": m.machine, "tag": "spindle_speed_rpm", "value": if m.running { (m.rpm * (0.95 + random_int(max: 100) / 1000.0)).round() } else { 0 }},
+          {"machine": m.machine, "tag": "temperature_c", "value": if m.running { 45 + 10 * $tri20 + random_int(max: 200) / 100.0 } else { 26 + random_int(max: 200) / 100.0 }},
+          {"machine": m.machine, "tag": "power_kw", "value": if m.running { 7.5 * m.rpm / 8000.0 + random_int(max: 300) / 100.0 } else { 0.6 + random_int(max: 30) / 100.0 }},
+          {"machine": m.machine, "tag": "vibration_mm_s",
+           "value": if !m.running { random_int(max: 20) / 100.0 } else if m.spike { 6 + random_int(max: 300) / 100.0 } else { 1.5 + random_int(max: 100) / 100.0 },
+           "quality": if m.running && m.spike { "Uncertain 0x40900000" } else { "Good" }}
+        ]).flatten()
+
+        # ---------------- Spritzguss ----------------
+        let sgm2 = if $day % 2 == 0 {
+          {"machine": "demo-sgm-02", "seed": 5, "down": 10, "werkzeug": "WZ-2002 Deckel 2-fach", "kav": 2, "zyklus": 22, "drift": 0}
+        } else {
+          {"machine": "demo-sgm-02", "seed": 5, "down": 10, "werkzeug": "WZ-2003 Clip 8-fach", "kav": 8, "zyklus": 16, "drift": 0}
+        }
+        let sgm = [
+          {"machine": "demo-sgm-01", "seed": 4, "down": 5, "werkzeug": "WZ-1001 Gehaeuse 4-fach", "kav": 4, "zyklus": 28, "drift": 4},
+          $sgm2
+        ].map_each(m -> m.merge({
+          "ruesten": $weekday && m.machine == "demo-sgm-02" && $hm >= 300 && $hm <= 344,
+          "stoerung": (($block * 7919 + m.seed * 104729) % 100) < m.down,
+          "druckspitze": random_int(max: 9999) < 200,
+          "grat": random_int(max: 9999) < 100,
+          "u": random_int(max: 2000) / 1000.0 - 1
+        })).map_each(m -> m.merge({
+          "running": $weekday && !m.ruesten && !m.stoerung,
+          "o": if m.druckspitze { 120 } else { 0 }
+        })).map_each(m -> m.merge({
+          "druck": 850 + 25 * m.u + m.o
+        })).map_each(m -> m.merge({
+          "nio": match {
+            !m.running => null,
+            m.druck < 790 || m.druck > 910 => "Einspritzdruck ausserhalb",
+            m.grat => "Sichtpruefung: Grat",
+            _ => null
+          }
+        }))
+        let sgm_rows = $sgm.map_each(m -> [
+          {"machine": m.machine, "tag": "state", "value": if m.running { 1 } else { 0 }},
+          {"machine": m.machine, "tag": "status", "value_text": if !$weekday { "Stillstand" } else if m.ruesten { "Ruesten" } else if m.stoerung { "Stoerung" } else { "Produktion" }},
+          {"machine": m.machine, "tag": "werkzeug", "value_text": m.werkzeug},
+          {"machine": m.machine, "tag": "kavitaeten", "value": m.kav},
+          {"machine": m.machine, "tag": "zykluszeit_s", "value": if m.running { m.zyklus * (1 + 0.01 * (random_int(max: 2000) / 1000.0 - 1)) } else { null }},
+          {"machine": m.machine, "tag": "massetemperatur_c", "value": if m.running { 230 + 3 * (random_int(max: 2000) / 1000.0 - 1) } else if $weekday { 220 + 2 * (random_int(max: 2000) / 1000.0 - 1) } else { 40 + 2 * (random_int(max: 2000) / 1000.0 - 1) }},
+          {"machine": m.machine, "tag": "werkzeugtemperatur_c", "value": if m.running { 60 + 1.5 * (random_int(max: 2000) / 1000.0 - 1) + m.drift * $triday } else if $weekday { 50 + (random_int(max: 2000) / 1000.0 - 1) } else { 25 + (random_int(max: 2000) / 1000.0 - 1) }},
+          {"machine": m.machine, "tag": "einspritzdruck_bar", "value": if m.running { m.druck.round() } else { null }},
+          {"machine": m.machine, "tag": "teil_io", "value": if !m.running { null } else if m.nio == null { 1 } else { 0 }},
+          {"machine": m.machine, "tag": "nio_grund", "value_text": m.nio}
+        ]).flatten()
+
+        # ---------------- Montage ----------------
+        # m1 = base1 + sc1*u1 + drift1*Schichtfortschritt (+ d1 bei Ausreisser p1)
+        # m2 = base2 + sc2*u2 (+ d2a + d2b*s3 bei Ausreisser p2); Linie 4 gesondert
+        let mon = [
+          {"machine": "demo-mon-01", "seed": 6, "down": 6, "takt": 18, "tag1": "schraub_drehmoment_nm", "tag2": "schraub_drehwinkel_grad",
+           "base1": 4.45, "sc1": 0.08, "drift1": 0.3, "p1": 0.01, "d1": -0.6, "base2": 720, "sc2": 15, "p2": 0.005, "d2a": -200, "d2b": 0},
+          {"machine": "demo-mon-02", "seed": 7, "down": 10, "takt": 25, "tag1": "pruefdruck_bar", "tag2": "leckrate_ccm_min",
+           "base1": 2.0, "sc1": 0.02, "drift1": 0, "p1": 0, "d1": 0, "base2": 0.6, "sc2": 0.3, "p2": 0.03, "d2a": 3, "d2b": 3},
+          {"machine": "demo-mon-03", "seed": 8, "down": 4, "takt": 12, "tag1": "einpresskraft_kn", "tag2": "einpressweg_mm",
+           "base1": 8.0, "sc1": 0.3, "drift1": 0, "p1": 0.015, "d1": 1.2, "base2": 12.0, "sc2": 0.05, "p2": 0.01, "d2a": -0.3, "d2b": 0},
+          {"machine": "demo-mon-04", "seed": 9, "down": 8, "takt": 30, "tag1": "isolationswiderstand_mohm", "tag2": "kamera_io",
+           "base1": 500, "sc1": 80, "drift1": 0, "p1": 0.01, "d1": 0, "base2": 1, "sc2": 0, "p2": 0.02, "d2a": 0, "d2b": 0}
+        ].map_each(m -> m.merge({
+          "stoerung": (($block * 7919 + m.seed * 104729) % 100) < m.down,
+          "u1": random_int(max: 2000) / 1000.0 - 1,
+          "u2": random_int(max: 2000) / 1000.0 - 1,
+          "u3": random_int(max: 2000) / 1000.0 - 1,
+          "s1": random_int(max: 9999) / 10000.0,
+          "s2": random_int(max: 9999) / 10000.0,
+          "s3": random_int(max: 9999) / 10000.0
+        })).map_each(m -> m.merge({
+          "running": $schicht && !$pause && !m.stoerung,
+          "o1": if m.s1 < m.p1 { m.d1 } else { 0 },
+          "o2": if m.s2 < m.p2 { m.d2a + m.d2b * m.s3 } else { 0 }
+        })).map_each(m -> m.merge({
+          "m1": if m.machine == "demo-mon-04" {
+                  if m.s1 < m.p1 { 40 + 30 * m.s3 } else { m.base1 + m.sc1 * m.u1 }
+                } else { m.base1 + m.sc1 * m.u1 + m.drift1 * $shiftpos + m.o1 },
+          "m2": if m.machine == "demo-mon-04" {
+                  if m.s2 < m.p2 { 0 } else { 1 }
+                } else { m.base2 + m.sc2 * m.u2 + m.o2 }
+        })).map_each(m -> m.merge({
+          "nio": match {
+            !m.running => null,
+            m.machine == "demo-mon-01" && (m.m1 < 4.2 || m.m1 > 4.8) => "Drehmoment ausserhalb",
+            m.machine == "demo-mon-01" && (m.m2 < 680 || m.m2 > 760) => "Drehwinkel ausserhalb",
+            m.machine == "demo-mon-02" && m.m2 > 2.0 => "Undicht",
+            m.machine == "demo-mon-03" && (m.m1 < 7.2 || m.m1 > 8.8) => "Einpresskraft ausserhalb",
+            m.machine == "demo-mon-03" && (m.m2 < 11.85 || m.m2 > 12.15) => "Einpressweg ausserhalb",
+            m.machine == "demo-mon-04" && m.m1 < 100 => "Isolation zu gering",
+            m.machine == "demo-mon-04" && m.m2 == 0 => "Kamera: Etikett fehlt",
+            _ => null
+          }
+        }))
+        let mon_rows = $mon.map_each(m -> [
+          {"machine": m.machine, "tag": "state", "value": if m.running { 1 } else { 0 }},
+          {"machine": m.machine, "tag": "status", "value_text": if !$schicht { "Stillstand" } else if $pause { "Pause" } else if m.stoerung { "Stoerung" } else { "Produktion" }},
+          {"machine": m.machine, "tag": "taktzeit_s", "value": if m.running { m.takt * (1 + 0.03 * m.u3) } else { null }},
+          {"machine": m.machine, "tag": "pruef_ergebnis", "value": if !m.running { null } else if m.nio == null { 1 } else { 0 }},
+          {"machine": m.machine, "tag": m.tag1, "value": if m.running { m.m1 } else { null }},
+          {"machine": m.machine, "tag": m.tag2, "value": if m.running { m.m2 } else { null }},
+          {"machine": m.machine, "tag": "nio_grund", "value_text": m.nio}
+        ]).flatten()
+
+        root = $cnc_rows.concat($sgm_rows, $mon_rows).map_each(r -> {
+          "ts": $ts,
+          "machine": r.machine,
+          "tag": r.tag,
+          "value": r.value,
+          "value_text": r.value_text,
+          "quality": r.quality.or("Good")
+        })
+    # 1: eine Zeile je Nachricht
+    - unarchive:
+        format: json_array
+    # 2: leere nio_grund-Zeilen (iO) verwerfen
+    - mapping: |
+        root = if this.tag == "nio_grund" && this.value_text == null { deleted() } else { this }
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s
