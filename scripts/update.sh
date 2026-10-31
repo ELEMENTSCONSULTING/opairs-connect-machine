@@ -11,6 +11,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 git pull --ff-only
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
 docker compose restart connector maintenance
 docker compose ps

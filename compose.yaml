@@ -14,7 +14,7 @@ x-logging: &default-logging
     max-file: "5"
 
 services:
-  db:
+  opairs-connect-db:
     image: postgres:17
     restart: unless-stopped
     logging: *default-logging
@@ -25,7 +25,9 @@ services:
       OPAIRS_WRITER_PASSWORD: ${OPAIRS_WRITER_PASSWORD:?OPAIRS_WRITER_PASSWORD fehlt (.env)}
       OPAIRS_READER_PASSWORD: ${OPAIRS_READER_PASSWORD:?OPAIRS_READER_PASSWORD fehlt (.env)}
     volumes:
-      - opairs-pgdata:/var/lib/postgresql/data
+      # Standard: Docker-Volume. Mit PGDATA_DIR in .env (absoluter Pfad, z. B.
+      # /srv/opairs/opairs-connect-db) liegen die Daten in einem Ordner auf dem Host.
+      - ${PGDATA_DIR:-opairs-pgdata}:/var/lib/postgresql/data
       - ./sql:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # -h 127.0.0.1 erzwingt TCP: waehrend der Erstinitialisierung lauscht
@@ -48,14 +50,14 @@ services:
     restart: unless-stopped
     logging: *default-logging
     depends_on:
-      db:
+      opairs-connect-db:
         condition: service_healthy
       # nur gestartet, nicht gesund: ohne Mirror laeuft der Connector weiter
       # (IO-Link-Sensoren liefern dann Rohdaten, neuer Versuch alle 10 s)
       iodd-mirror:
         condition: service_started
     environment:
-      POSTGRES_DSN: postgres://opairs_writer:${OPAIRS_WRITER_PASSWORD}@db:5432/${POSTGRES_DB:-opairs}?sslmode=disable
+      POSTGRES_DSN: postgres://opairs_writer:${OPAIRS_WRITER_PASSWORD}@opairs-connect-db:5432/${POSTGRES_DB:-opairs}?sslmode=disable
       MACHINE_NAME: ${MACHINE_NAME:-machine-01}
       OPCUA_ENDPOINT: ${OPCUA_ENDPOINT:-opc.tcp://host.docker.internal:4840}
       IFM_MASTER_ADDRESS: ${IFM_MASTER_ADDRESS:-192.168.0.1}
@@ -94,10 +96,10 @@ services:
     restart: unless-stopped
     logging: *default-logging
     depends_on:
-      db:
+      opairs-connect-db:
         condition: service_healthy
     environment:
-      PGHOST: db
+      PGHOST: opairs-connect-db
       PGUSER: ${POSTGRES_USER:-opairs}
       PGPASSWORD: ${POSTGRES_PASSWORD}
       PGDATABASE: ${POSTGRES_DB:-opairs}

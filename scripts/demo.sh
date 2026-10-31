@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Demo-Daten fuer Superset.
 #
-#   ./scripts/demo.sh backfill   7 Tage Historie fuer demo-cnc-01..03 erzeugen
+#   ./scripts/demo.sh backfill   7 Tage Historie fuer 9 Demo-Anlagen erzeugen
 #   ./scripts/demo.sh live       Connector auf die Demo-Pipeline umstellen (laeuft weiter)
 #   ./scripts/demo.sh remove     alle Demo-Daten loeschen
 #
@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 psql_file() {
-    docker compose exec -T db sh -c \
+    docker compose exec -T opairs-connect-db sh -c \
       'psql -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -P pager=off -f "$1"' _ "$1"
 }
 
@@ -29,7 +29,7 @@ case "${1:-}" in
         fi
         docker compose up -d
         docker compose restart connector
-        echo "Demo-Pipeline laeuft (demo-cnc-01..03, 1 Wert je Sekunde und Tag)."
+        echo "Demo-Pipeline laeuft (9 Anlagen, Takt 10 s)."
         ;;
     remove)
         psql_file /docker-entrypoint-initdb.d/demo/demo_remove.sql

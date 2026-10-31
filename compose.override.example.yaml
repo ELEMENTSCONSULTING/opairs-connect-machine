@@ -8,6 +8,6 @@
 # nicht eingecheckt. Nur an eine interne Adresse binden (nicht 0.0.0.0) und
 # den Port in der Firewall nur fuer den Superset-Host oeffnen.
 services:
-  db:
+  opairs-connect-db:
     ports:
       - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-55432}:5432"
