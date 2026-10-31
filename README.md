@@ -30,6 +30,9 @@ Quelle angebunden wird.
 Echte Quelle anbinden: in `.env` die Variable `PIPELINE` auf eine Datei aus
 `pipelines/` setzen (z. B. `/etc/opairs/pipelines/opcua-to-postgres.yaml`), die
 Knoten (`nodeIDs`) in der Datei anpassen und `docker compose up -d` ausfuehren.
+
+Wichtig: Wird nur der **Inhalt** einer Pipeline-Datei geaendert, bemerkt
+Compose das nicht. Dann `docker compose restart connector` ausfuehren.
 Weitere Protokolle: siehe `docs/input/` (S7, Modbus, EtherNet/IP, ifm IO-Link,
 Beckhoff ADS, Sparkplug B).
 
@@ -134,6 +137,17 @@ freigeben (auskommentierter Block), moeglichst nur im internen Netz und mit TLS.
 - `opairs_writer`: Connector, darf nur in `opairs.machine_data` einfuegen
 - `opairs_reader`: Superset, darf nur lesen
 - Admin-Benutzer (`POSTGRES_USER`): Setup und Wartung
+
+## Update
+
+```bash
+./scripts/update.sh
+```
+
+Holt den neuen Stand, baut die Images und startet `connector` und
+`maintenance` neu. Der Neustart ist noetig, weil Pipelines und SQL als Ordner
+eingebunden sind: `docker compose up -d` allein laesst die Container weiterlaufen,
+und das Schema wird nur beim Start der Wartung eingespielt.
 
 ## Upstream-Updates
 
