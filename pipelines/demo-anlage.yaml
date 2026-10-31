@@ -1,0 +1,56 @@
+# Demo-Anlage: drei simulierte CNC-Maschinen (demo-cnc-01 .. demo-cnc-03),
+# ein Wert je Sekunde und Tag. Gleiches Muster wie sql/demo/demo_backfill.sql
+# (dort 7 Tage Historie). Fuer Superset-Tests ohne echte Maschine.
+#
+#   ./scripts/demo.sh live
+#
+# Tags: state (1 laeuft / 0 steht), spindle_speed_rpm, temperature_c,
+#       power_kw, vibration_mm_s (Spitzen mit quality "Uncertain 0x40900000")
+# Schicht Mo-Fr 05:00-21:00 UTC; Stoerungen als 5-Minuten-Bloecke
+# (cnc-01 ~8 %, cnc-02 ~15 %, cnc-03 ~4 % der Schicht).
+
+input:
+  generate:
+    interval: 1s
+    mapping: 'root = {}'
+
+pipeline:
+  processors:
+    - mapping: |
+        let ts = now()
+        let e = $ts.ts_unix()
+        let hour = $ts.ts_format("15", "UTC").number()
+        let dow = $ts.ts_format("Mon", "UTC")
+        let shift = !["Sat", "Sun"].contains($dow) && $hour >= 5 && $hour <= 20
+        let block = ($e / 300).floor().int64()
+        let tri = (2 * (($e % 1200) / 1200.0) - 1).abs()
+        let ms = [
+          {"machine": "demo-cnc-01", "seed": 1, "rpm": 8000, "down": 8},
+          {"machine": "demo-cnc-02", "seed": 2, "rpm": 6500, "down": 15},
+          {"machine": "demo-cnc-03", "seed": 3, "rpm": 9500, "down": 4}
+        ].map_each(m -> m.merge({
+          "running": $shift && (($block * 7919 + m.seed * 104729) % 100) >= m.down,
+          "spike": (($e + m.seed * 7) % 50) == 0
+        }))
+        root = $ms.map_each(m -> [
+          {"machine": m.machine, "tag": "state", "value": if m.running { 1 } else { 0 }, "quality": "Good"},
+          {"machine": m.machine, "tag": "spindle_speed_rpm", "value": if m.running { (m.rpm * (0.95 + random_int(max: 100) / 1000.0)).round() } else { 0 }, "quality": "Good"},
+          {"machine": m.machine, "tag": "temperature_c", "value": if m.running { 45 + 10 * $tri + random_int(max: 200) / 100.0 } else { 26 + random_int(max: 200) / 100.0 }, "quality": "Good"},
+          {"machine": m.machine, "tag": "power_kw", "value": if m.running { 7.5 * m.rpm / 8000.0 + random_int(max: 300) / 100.0 } else { 0.6 + random_int(max: 30) / 100.0 }, "quality": "Good"},
+          {"machine": m.machine, "tag": "vibration_mm_s",
+           "value": if !m.running { random_int(max: 20) / 100.0 } else if m.spike { 6 + random_int(max: 300) / 100.0 } else { 1.5 + random_int(max: 100) / 100.0 },
+           "quality": if m.running && m.spike { "Uncertain 0x40900000" } else { "Good" }}
+        ]).flatten().map_each(r -> r.merge({"ts": $ts, "value_text": null}))
+    - unarchive:
+        format: json_array
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s

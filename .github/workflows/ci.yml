@@ -66,6 +66,14 @@ jobs:
       - name: Smoke-Test und SQL-Tests
         run: scripts/ci-run.sh "Smoke-Test" ./scripts/smoke-test.sh
 
+      - name: Demo-Daten (Backfill und Entfernen)
+        run: |
+          CI_NOTICE=1 scripts/ci-run.sh "Demo-Backfill" ./scripts/demo.sh backfill
+          n=$(docker compose exec -T db psql -U opairs -d opairs -tAc "SELECT count(*) FROM opairs.machine_data_1min WHERE machine LIKE 'demo-%'")
+          echo "Minutenwerte Demo: $n"
+          [ "$n" -gt 20000 ] || { echo "::error title=Demo::zu wenige Minutenwerte ($n)"; exit 1; }
+          scripts/ci-run.sh "Demo-Entfernen" ./scripts/demo.sh remove
+
       - name: Logs bei Fehler
         if: failure()
         run: scripts/ci-run.sh "Container-Logs" sh -c 'docker compose logs --no-color --tail=40; exit 1' || true

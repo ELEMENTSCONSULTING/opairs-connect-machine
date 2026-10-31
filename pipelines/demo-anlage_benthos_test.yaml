@@ -1,0 +1,24 @@
+# Unit-Test fuer das Mapping der Demo-Anlage: 3 Maschinen x 5 Tags je Takt.
+#   docker run --rm -v "$PWD/pipelines:/p:ro" opairs-connect-machine:dev test /p/...
+tests:
+  - name: Ein Takt ergibt 15 Zeilen mit plausiblen Werten
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '{}'
+    output_batches:
+      -
+        - bloblang: 'this.machine == "demo-cnc-01" && this.tag == "state" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string" && [0, 1].contains(this.value)'
+        - bloblang: 'this.machine == "demo-cnc-01" && this.tag == "spindle_speed_rpm" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string"'
+        - bloblang: 'this.machine == "demo-cnc-01" && this.tag == "temperature_c" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string" && this.value >= 26 && this.value <= 57'
+        - bloblang: 'this.machine == "demo-cnc-01" && this.tag == "power_kw" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string"'
+        - bloblang: 'this.machine == "demo-cnc-01" && this.tag == "vibration_mm_s" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string"'
+        - bloblang: 'this.machine == "demo-cnc-02" && this.tag == "state" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string" && [0, 1].contains(this.value)'
+        - bloblang: 'this.machine == "demo-cnc-02" && this.tag == "spindle_speed_rpm" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string"'
+        - bloblang: 'this.machine == "demo-cnc-02" && this.tag == "temperature_c" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string" && this.value >= 26 && this.value <= 57'
+        - bloblang: 'this.machine == "demo-cnc-02" && this.tag == "power_kw" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string"'
+        - bloblang: 'this.machine == "demo-cnc-02" && this.tag == "vibration_mm_s" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string"'
+        - bloblang: 'this.machine == "demo-cnc-03" && this.tag == "state" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string" && [0, 1].contains(this.value)'
+        - bloblang: 'this.machine == "demo-cnc-03" && this.tag == "spindle_speed_rpm" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string"'
+        - bloblang: 'this.machine == "demo-cnc-03" && this.tag == "temperature_c" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string" && this.value >= 26 && this.value <= 57'
+        - bloblang: 'this.machine == "demo-cnc-03" && this.tag == "power_kw" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string"'
+        - bloblang: 'this.machine == "demo-cnc-03" && this.tag == "vibration_mm_s" && this.value.type() == "number" && this.value_text == null && ["Good", "Uncertain 0x40900000"].contains(this.quality) && this.ts.type() == "string"'

@@ -127,10 +127,50 @@ Datenbank angelegt.
 
 ## Superset
 
-Datenquelle als PostgreSQL anlegen, Benutzer `opairs_reader` (nur lesend),
-Schema `opairs`. Fuer Dashboards `machine_data_1min` bzw. `v_latest_1min`
-verwenden, nicht die Rohdaten. Dazu in `compose.yaml` den Datenbank-Port
-freigeben (auskommentierter Block), moeglichst nur im internen Netz und mit TLS.
+Datenquelle vom Typ PostgreSQL, Benutzer `opairs_reader` (nur lesend), Schema
+`opairs`. Fuer Dashboards `machine_data_1min` bzw. `v_latest_1min` verwenden,
+nicht die Rohdaten.
+
+**Superset auf einem anderen Host:** Port per `compose.override.yaml`
+freigeben (Vorlage `compose.override.example.yaml`, nur an eine interne
+Adresse, Firewall nur fuer den Superset-Host oeffnen):
+
+```bash
+cp compose.override.example.yaml compose.override.yaml
+echo "DB_BIND_ADDRESS=<interne IP dieses Servers>" >> .env
+echo "DB_PORT=55432" >> .env
+docker compose up -d
+```
+
+SQLAlchemy-URI in Superset:
+`postgresql://opairs_reader:<OPAIRS_READER_PASSWORD>@<IP>:55432/opairs`
+
+**Superset auf demselben Host (Docker):** ohne Portfreigabe, den
+Superset-Container ins Netz des Stacks haengen
+(`docker network connect opairs-connect-machine_default <superset-container>`)
+und als Host `db`, Port `5432` verwenden.
+
+## Demo-Daten
+
+Fuer Superset-Tests ohne Maschine: drei simulierte CNC-Maschinen
+`demo-cnc-01..03` mit Schichtbetrieb, Stoerungen und Qualitaetsspitzen.
+
+```bash
+./scripts/demo.sh backfill   # 7 Tage Historie (ca. 900 000 Zeilen, unter 1 Minute)
+./scripts/demo.sh live       # Connector laeuft mit der Demo-Pipeline weiter
+./scripts/demo.sh remove     # alle Demo-Daten loeschen
+```
+
+| Tag | Bedeutung | Auswertung |
+|---|---|---|
+| `state` | 1 laeuft, 0 steht | Mittelwert je Stunde/Tag = Verfuegbarkeit |
+| `spindle_speed_rpm` | Drehzahl | Verlauf |
+| `temperature_c` | Temperatur | Verlauf, min/max |
+| `power_kw` | Leistung | Summe der Minutenmittel / 60 = kWh |
+| `vibration_mm_s` | Vibration, Spitzen mit `Uncertain` | `bad_count` |
+
+Schicht Mo-Fr 05:00-21:00 UTC, Stoerungen als 5-Minuten-Bloecke
+(cnc-01 ca. 8 %, cnc-02 ca. 15 %, cnc-03 ca. 4 % der Schicht).
 
 ## Rollen
 
