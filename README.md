@@ -152,25 +152,34 @@ und als Host `db`, Port `5432` verwenden.
 
 ## Demo-Daten
 
-Fuer Superset-Tests ohne Maschine: drei simulierte CNC-Maschinen
-`demo-cnc-01..03` mit Schichtbetrieb, Stoerungen und Qualitaetsspitzen.
+Fuer Superset-Tests ohne Maschine: 9 simulierte Anlagen mit Schichtbetrieb,
+Stoerungen, Qualitaetsspitzen und iO/NiO-Pruefungen.
 
 ```bash
-./scripts/demo.sh backfill   # 7 Tage Historie (ca. 900 000 Zeilen, unter 1 Minute)
-./scripts/demo.sh live       # Connector laeuft mit der Demo-Pipeline weiter
+./scripts/demo.sh backfill   # 7 Tage Historie (ca. 3 Mio. Zeilen, unter 1 Minute)
+./scripts/demo.sh live       # Connector laeuft mit der Demo-Pipeline weiter (Takt 10 s)
 ./scripts/demo.sh remove     # alle Demo-Daten loeschen
 ```
 
-| Tag | Bedeutung | Auswertung |
-|---|---|---|
-| `state` | 1 laeuft, 0 steht | Mittelwert je Stunde/Tag = Verfuegbarkeit |
-| `spindle_speed_rpm` | Drehzahl | Verlauf |
-| `temperature_c` | Temperatur | Verlauf, min/max |
-| `power_kw` | Leistung | Summe der Minutenmittel / 60 = kWh |
-| `vibration_mm_s` | Vibration, Spitzen mit `Uncertain` | `bad_count` |
+Zeiten UTC. Schicht Mo-Fr 05:00-21:00, Spritzguss Mo-Fr durchgehend,
+Montage-Pausen 09:00-09:15 und 13:00-13:30, Stoerungen als 5-Minuten-Bloecke.
 
-Schicht Mo-Fr 05:00-21:00 UTC, Stoerungen als 5-Minuten-Bloecke
-(cnc-01 ca. 8 %, cnc-02 ca. 15 %, cnc-03 ca. 4 % der Schicht).
+| Anlage | Art | Tags |
+|---|---|---|
+| `demo-cnc-01..03` | CNC-Bearbeitung | `state`, `spindle_speed_rpm`, `temperature_c`, `power_kw`, `vibration_mm_s` (Spitzen mit `Uncertain` -> `bad_count`) |
+| `demo-sgm-01` | Spritzguss, Werkzeug `WZ-1001 Gehaeuse 4-fach` | `state`, `status`, `werkzeug`, `kavitaeten`, `zykluszeit_s`, `massetemperatur_c`, `werkzeugtemperatur_c` (Tagesdrift), `einspritzdruck_bar`, `teil_io`, `nio_grund` |
+| `demo-sgm-02` | Spritzguss, taeglicher Werkzeugwechsel `WZ-2002 Deckel 2-fach` / `WZ-2003 Clip 8-fach`, Ruesten 05:00-05:45 | wie sgm-01 |
+| `demo-mon-01` | Schraubstation | `schraub_drehmoment_nm` (steigt ueber die Schicht, Bit-Verschleiss), `schraub_drehwinkel_grad` |
+| `demo-mon-02` | Dichtheitspruefung | `pruefdruck_bar`, `leckrate_ccm_min` (NiO > 2.0) |
+| `demo-mon-03` | Einpressstation | `einpresskraft_kn` (iO 7.2-8.8), `einpressweg_mm` (iO 11.85-12.15) |
+| `demo-mon-04` | Endpruefung | `isolationswiderstand_mohm` (NiO < 100), `kamera_io` |
+
+Alle Montagelinien zusaetzlich: `state`, `status` (Produktion/Pause/Stoerung/
+Stillstand), `taktzeit_s`, `pruef_ergebnis` (1 = iO, 0 = NiO; Mittelwert =
+iO-Quote) und `nio_grund` (Text, nur bei NiO).
+
+Textwerte (`status`, `werkzeug`, `nio_grund`) stehen in `value_text` der
+Rohdaten und erscheinen nicht in den Minutenwerten.
 
 ## Rollen
 
