@@ -108,3 +108,27 @@ func TestPluginUnknownDeviceFailsFast(t *testing.T) {
 		t.Fatalf("zu langsam (%v): Plugin hat wiederholt", d)
 	}
 }
+
+// Grossgeschriebene Endung und Latin-1: das Plugin muss die Datei lesen koennen.
+func TestPluginUpperCaseAndLatin1(t *testing.T) {
+	dir := t.TempDir()
+	x := mirror.IODDXML(77, 88, "V1", "2024-01-01", "Sensor")
+	x = []byte(strings.Replace(string(x), `encoding="utf-8"`, `encoding="ISO-8859-1"`, 1))
+	x = []byte(strings.Replace(string(x), `vendorName="Test Vendor"`, "vendorName=\"M\xfcller\"", 1))
+	os.WriteFile(filepath.Join(dir, "SENSOR.XML"), x, 0o644)
+	m, err := mirror.New(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(m.Handler())
+	defer srv.Close()
+
+	in := &sensorconnect_plugin.SensorConnectInput{IODDAPI: srv.URL}
+	if err := in.FetchAndStoreIoDDFile(context.Background(), 77, 88); err != nil {
+		t.Fatalf("Plugin konnte IODD nicht laden: %v", err)
+	}
+	v, _ := in.IoDeviceMap.Load(sensorconnect_plugin.IoddFilemapKey{VendorId: 77, DeviceId: 88})
+	if v.(sensorconnect_plugin.IoDevice).ProfileBody.DeviceIdentity.VendorName != "Müller" {
+		t.Fatalf("VendorName falsch: %+v", v)
+	}
+}

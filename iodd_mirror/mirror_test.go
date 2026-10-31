@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -353,5 +354,81 @@ func TestFetchRejectsInvalidZIP(t *testing.T) {
 	entries, _ := os.ReadDir(out)
 	if len(entries) != 0 {
 		t.Fatalf("keine Dateien erwartet, gefunden: %v", entries)
+	}
+}
+
+// Grossgeschriebene Endung: ausgelieferter Name muss auf ".xml" enden, sonst
+// ignoriert das Plugin die Datei und stuerzt ab (Index ausserhalb).
+func TestUpperCaseExtensionServedAsLowerXML(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "SENSOR.XML"), IODDXML(5, 6, "V1", "2024-01-01", "A"), 0o644)
+	writeZIP(t, filepath.Join(dir, "PAKET.ZIP"), map[string][]byte{"IN-ZIP.XML": IODDXML(5, 7, "V1", "2024-01-01", "B")})
+	m, _ := New(dir, nil)
+	if m.Count() != 2 {
+		t.Fatalf("2 erwartet, erhalten %d", m.Count())
+	}
+	for _, e := range m.idx.all {
+		if !strings.HasSuffix(e.XMLName, ".xml") {
+			t.Fatalf("Name %q endet nicht auf .xml", e.XMLName)
+		}
+	}
+}
+
+func TestLatin1ConvertedToUTF8(t *testing.T) {
+	dir := t.TempDir()
+	x := IODDXML(9, 10, "V1", "2024-01-01", "Sensor")
+	x = bytes.Replace(x, []byte(`encoding="utf-8"`), []byte(`encoding="ISO-8859-1"`), 1)
+	x = bytes.Replace(x, []byte(`vendorName="Test Vendor"`), []byte("vendorName=\"M\xfcller\""), 1) // ü in Latin-1
+	os.WriteFile(filepath.Join(dir, "latin1.xml"), x, 0o644)
+	m, _ := New(dir, nil)
+	if m.Count() != 1 {
+		t.Fatal("Latin-1-IODD nicht erkannt")
+	}
+	e := m.idx.all[0]
+	if e.VendorName != "Müller" || !bytes.Contains(e.XML, []byte(`encoding="UTF-8"`)) {
+		t.Fatalf("Umwandlung falsch: %q", e.VendorName)
+	}
+}
+
+func TestBrokenXMLIsLogged(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "kaputt.xml"), []byte("<IODevice><ProfileBody>"), 0o644)
+	os.WriteFile(filepath.Join(dir, "sprache.xml"), LangXML, 0o644)
+	os.WriteFile(filepath.Join(dir, ".fetch-123.zip"), []byte("halb"), 0o644)
+	var buf bytes.Buffer
+	New(dir, log.New(&buf, "", 0))
+	out := buf.String()
+	if !strings.Contains(out, "kaputt.xml") {
+		t.Fatalf("Warnung fuer kaputte XML fehlt: %s", out)
+	}
+	if strings.Contains(out, "sprache.xml") || strings.Contains(out, ".fetch-") {
+		t.Fatalf("unnoetige Warnung: %s", out)
+	}
+}
+
+func TestSameDatePrefersNewerIOLinkRevision(t *testing.T) {
+	dir := t.TempDir()
+	v11 := IODDXML(3, 4, "V1", "2024-01-01", "A")
+	v10 := bytes.Replace(v11, []byte("<ProfileRevision>1.1</ProfileRevision>"), []byte("<ProfileRevision>1.0</ProfileRevision>"), 1)
+	os.WriteFile(filepath.Join(dir, "a-iodd10.xml"), v10, 0o644)
+	os.WriteFile(filepath.Join(dir, "b-iodd11.xml"), v11, 0o644)
+	_, srv := newServer(t, dir)
+	var resp DriversResponse
+	getJSON(t, srv.URL+"/drivers?deviceIdString=4", &resp)
+	if len(resp.Content) != 2 || resp.Content[0].IoLinkRev != "1.1" {
+		t.Fatalf("IODD 1.1 zuerst erwartet: %+v", resp.Content)
+	}
+}
+
+func TestFetchedFileIsWorldReadable(t *testing.T) {
+	srcDir, _ := fixtureDir(t)
+	_, src := newServer(t, srcDir)
+	path, err := Fetch(context.Background(), nil, src.URL, 310, 967, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(path)
+	if st.Mode().Perm() != 0o644 {
+		t.Fatalf("0644 erwartet, erhalten %v", st.Mode().Perm())
 	}
 }

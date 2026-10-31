@@ -50,8 +50,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      # nur gestartet, nicht gesund: ohne Mirror laeuft der Connector weiter
+      # (IO-Link-Sensoren liefern dann Rohdaten, neuer Versuch alle 10 s)
       iodd-mirror:
-        condition: service_healthy
+        condition: service_started
     environment:
       POSTGRES_DSN: postgres://opairs_writer:${OPAIRS_WRITER_PASSWORD}@db:5432/${POSTGRES_DB:-opairs}?sslmode=disable
       MACHINE_NAME: ${MACHINE_NAME:-machine-01}

@@ -4,7 +4,10 @@
 # Internet (siehe iodd/README.md). Sensoren ohne IODD liefern Rohdaten.
 #
 # Jeder Messwert wird eine Zeile: tag = "port<Nr>.<Messgroesse>",
-# z. B. "port1.Temperature".
+# z. B. "port1.Temperature". Bei Bluetooth-Mesh (EIO404) steht der Adapter
+# davor: "mesh<Adapter>.port1.Temperature".
+# Ohne IODD liefert das Plugin "raw_sensor_output" (base64); gespeichert wird
+# der Hex-Wert als value_text unter "port<Nr>.raw".
 #
 # Anpassen: IFM_MASTER_ADDRESS, MACHINE_NAME (siehe .env.example)
 # Starten:  PIPELINE=/etc/opairs/pipelines/ifm-to-postgres.yaml docker compose up -d
@@ -19,9 +22,13 @@ pipeline:
     - mapping: |
         let ts = now()
         let machine = env("MACHINE_NAME").or("unknown")
-        let prefix = "port" + meta("sensorconnect_port_number").or("0")
+        let mesh = meta("sensorconnect_bluetooth_meshadapter").or("none")
+        let meshp = if $mesh == "none" || $mesh == "" { "" } else { "mesh" + $mesh + "." }
+        let prefix = $meshp + "port" + meta("sensorconnect_port_number").or("0")
         let fields = if this.type() == "object" {
-          this.key_values().sort_by(kv -> kv.key)
+          this.key_values().sort_by(kv -> kv.key).map_each(kv -> if kv.key == "raw_sensor_output" && kv.value.type() == "string" {
+            {"key": "raw", "value": kv.value.decode("base64").string().catch(kv.value)}
+          } else { kv })
         } else {
           [{"key": "raw", "value": this}]
         }

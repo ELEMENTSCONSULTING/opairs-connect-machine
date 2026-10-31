@@ -76,6 +76,11 @@ func Fetch(ctx context.Context, client *http.Client, api string, vendorID, devic
 		tmp.Close()
 		return "", err
 	}
+	// CreateTemp legt 0600 an; der Mirror laeuft als anderer Benutzer.
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return "", err
+	}
 	if err := tmp.Close(); err != nil {
 		return "", err
 	}
@@ -103,7 +108,7 @@ func validateZIP(data []byte, vendorID, deviceID int64) error {
 		if err != nil || len(x) > MaxXMLSize {
 			continue
 		}
-		if e, ok := parseIODD(x, f.Name, f.Name, time.Time{}); ok && e.VendorID == vendorID && e.DeviceID == deviceID {
+		if e, ok, _ := parseIODD(x, f.Name, f.Name, time.Time{}); ok && e.VendorID == vendorID && e.DeviceID == deviceID {
 			return nil
 		}
 	}

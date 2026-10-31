@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -137,9 +138,12 @@ func (m *Mirror) Rescan() error {
 			}
 			return nil
 		}
+		if strings.HasPrefix(d.Name(), ".") {
+			return nil // versteckte Dateien (z. B. abgebrochene Downloads)
+		}
 		rel, _ := filepath.Rel(m.Dir, path)
 		rel = filepath.ToSlash(rel)
-		info, err := d.Info()
+		info, err := os.Stat(path) // folgt Symlinks, damit die Groessengrenze greift
 		if err != nil {
 			m.Logger.Printf("WARN %s: %v", rel, err)
 			return nil
@@ -155,7 +159,11 @@ func (m *Mirror) Rescan() error {
 				m.Logger.Printf("WARN %s: %v", rel, err)
 				return nil
 			}
-			if e, ok := parseIODD(data, d.Name(), rel, info.ModTime()); ok {
+			e, ok, perr := parseIODD(data, d.Name(), rel, info.ModTime())
+			if perr != nil {
+				m.Logger.Printf("WARN %s: keine lesbare XML, uebersprungen: %v", rel, perr)
+			}
+			if ok {
 				idx.add(e)
 			}
 		case ".zip":
@@ -218,7 +226,11 @@ func (m *Mirror) readZIP(path, rel string, mod time.Time) []*Entry {
 			continue
 		}
 		name := filepath.Base(filepath.FromSlash(f.Name))
-		if e, ok := parseIODD(data, name, rel+"!"+f.Name, mod); ok {
+		e, ok, perr := parseIODD(data, name, rel+"!"+f.Name, mod)
+		if perr != nil {
+			m.Logger.Printf("WARN %s!%s: keine lesbare XML, uebersprungen: %v", rel, f.Name, perr)
+		}
+		if ok {
 			out = append(out, e)
 		}
 	}
@@ -250,15 +262,20 @@ type ioddDoc struct {
 }
 
 // parseIODD erkennt eine Haupt-IODD (Wurzel IODevice mit DeviceIdentity).
-// Sprachdateien, Bilder und andere XMLs liefern ok=false.
-func parseIODD(data []byte, xmlName, source string, mod time.Time) (*Entry, bool) {
+// Sprachdateien, Bilder und andere gueltige XMLs liefern ok=false ohne
+// Fehler; err ist nur bei nicht lesbarer XML gesetzt.
+//
+// IODDs in ISO-8859-1 / Windows-1252 werden nach UTF-8 umgewandelt (auch die
+// ausgelieferte Datei), weil das Plugin nur UTF-8 lesen kann.
+func parseIODD(data []byte, fileName, source string, mod time.Time) (*Entry, bool, error) {
+	data = toUTF8(data)
 	var doc ioddDoc
 	if err := xml.Unmarshal(data, &doc); err != nil {
-		return nil, false
+		return nil, false, err
 	}
 	id := doc.ProfileBody.DeviceIdentity
 	if doc.XMLName.Local != "IODevice" || id.VendorID <= 0 || id.DeviceID <= 0 {
-		return nil, false
+		return nil, false, nil
 	}
 
 	upload := mod.UnixMilli()
@@ -272,11 +289,11 @@ func parseIODD(data []byte, xmlName, source string, mod time.Time) (*Entry, bool
 			products = append(products, v.ProductID)
 		}
 	}
-	productName := strings.TrimSuffix(xmlName, filepath.Ext(xmlName))
+	base := strings.TrimSuffix(fileName, filepath.Ext(fileName))
 
 	return &Entry{
 		Content: Content{
-			ProductName:        productName,
+			ProductName:        base,
 			IndicationOfSource: "local",
 			IoLinkRev:          doc.ProfileHeader.ProfileRevision,
 			VersionString:      doc.DocumentInfo.Version,
@@ -287,10 +304,57 @@ func parseIODD(data []byte, xmlName, source string, mod time.Time) (*Entry, bool
 			VendorID:           id.VendorID,
 			DeviceID:           id.DeviceID,
 		},
-		Source:  source,
-		XMLName: xmlName,
+		Source: source,
+		// Das Plugin uebernimmt nur ZIP-Eintraege, die auf kleingeschriebenes
+		// "xml" enden (sonst Absturz), daher immer ".xml".
+		XMLName: base + ".xml",
 		XML:     data,
-	}, true
+	}, true, nil
+}
+
+var encodingDecl = regexp.MustCompile(`(?i)^(\s*<\?xml[^>]*?encoding\s*=\s*["'])([^"']+)(["'])`)
+
+// cp1252 belegt 0x80-0x9F anders als ISO-8859-1.
+var cp1252 = [32]rune{
+	0x20AC, 0x81, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x8D, 0x017D, 0x8F,
+	0x90, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D, 0x017E, 0x0178,
+}
+
+// toUTF8 wandelt ISO-8859-1/Windows-1252 nach UTF-8 und passt die
+// XML-Deklaration an. Andere Kodierungen bleiben unveraendert.
+func toUTF8(data []byte) []byte {
+	head := data
+	if len(head) > 256 {
+		head = head[:256]
+	}
+	m := encodingDecl.FindSubmatchIndex(head)
+	if m == nil {
+		return data
+	}
+	enc := strings.ToLower(string(head[m[4]:m[5]]))
+	var win bool
+	switch enc {
+	case "iso-8859-1", "iso8859-1", "latin1", "latin-1", "l1":
+	case "windows-1252", "cp1252":
+		win = true
+	default:
+		return data
+	}
+	var b strings.Builder
+	b.Grow(len(data) + len(data)/8)
+	b.Write(data[:m[4]])
+	b.WriteString("UTF-8")
+	for _, c := range data[m[5]:] {
+		switch {
+		case c < 0x80:
+			b.WriteByte(c)
+		case win && c < 0xA0:
+			b.WriteRune(cp1252[c-0x80])
+		default:
+			b.WriteRune(rune(c))
+		}
+	}
+	return []byte(b.String())
 }
 
 func (idx *index) add(e *Entry) {
@@ -319,6 +383,9 @@ func (idx *index) finish() {
 		sort.Slice(list, func(i, j int) bool {
 			if list[i].UploadDate != list[j].UploadDate {
 				return list[i].UploadDate > list[j].UploadDate
+			}
+			if list[i].IoLinkRev != list[j].IoLinkRev {
+				return list[i].IoLinkRev > list[j].IoLinkRev // "1.1" vor "1.0"
 			}
 			return list[i].Source < list[j].Source
 		})

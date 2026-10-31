@@ -43,7 +43,7 @@ jobs:
           n=$(grep -c '^--- PASS: TestPlugin' /tmp/gotest.log || true)
           summary=$(grep -E '^(--- (PASS|FAIL|SKIP)|ok|FAIL)' /tmp/gotest.log | tail -n 30 | awk 'BEGIN{ORS="%0A"} {print}')
           echo "::notice title=IODD-Mirror Go-Tests (${n} Plugin-Tests)::${summary}"
-          [ "$n" -ge 4 ] || { echo "::error title=IODD-Mirror::nur $n Plugin-Kompatibilitaetstests gelaufen"; exit 1; }
+          [ "$n" -ge 5 ] || { echo "::error title=IODD-Mirror::nur $n Plugin-Kompatibilitaetstests gelaufen"; exit 1; }
 
       - name: Pipelines pruefen (benthos lint)
         run: |

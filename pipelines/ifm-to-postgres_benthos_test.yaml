@@ -15,13 +15,28 @@ tests:
         - bloblang: 'this.tag == "port2.OUT1" && this.value == 1 && this.value_text == null'
         - bloblang: 'this.tag == "port2.Temperature" && this.value == 39.4 && this.value_text == null && this.quality == "Good" && this.ts.type() == "string"'
 
-  - name: Rohdaten ohne IODD
+  # So liefert das Plugin Rohdaten ohne IODD ([]byte -> base64 in JSON),
+  # vgl. sensorconnect_plugin/sensorconnect_test.go
+  - name: Rohdaten ohne IODD werden als Hex gespeichert
     environment:
       MACHINE_NAME: m1
     target_processors: /pipeline/processors
     input_batch:
-      - content: '"0A1B"'
+      - content: '{"raw_sensor_output": "MDAwMEZDMDAwMDAyRkYwMDAwMDBGRjAwMDE4RkZGMDAwMDI3RkYwMw=="}'
         metadata:
           sensorconnect_port_number: "4"
+          sensorconnect_bluetooth_meshadapter: none
     output_batches:
-      - - bloblang: 'this.tag == "port4.raw" && this.value == null && this.value_text == "0A1B"'
+      - - bloblang: 'this.tag == "port4.raw" && this.value == null && this.value_text == "0000FC000002FF000000FF00018FFF000027FF03"'
+
+  - name: Digitaler Eingang und Bluetooth-Mesh-Adapter im Tag
+    environment:
+      MACHINE_NAME: m1
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '{"pin2in": 1}'
+        metadata:
+          sensorconnect_port_number: "1"
+          sensorconnect_bluetooth_meshadapter: "3"
+    output_batches:
+      - - bloblang: 'this.tag == "mesh3.port1.pin2in" && this.value == 1'

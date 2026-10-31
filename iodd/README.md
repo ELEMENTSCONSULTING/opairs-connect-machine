@@ -14,6 +14,11 @@ Repository eingecheckt.
 - Sprachdateien und Bilder in den ZIPs werden automatisch ignoriert.
 - Liegen mehrere Versionen desselben Geraets vor, nimmt der Connector die mit
   dem neuesten `releaseDate`.
+- Dateien muessen fuer andere lesbar sein (`chmod -R a+rX iodd`), der Dienst
+  laeuft nicht als root. Mit `fetch` geladene Dateien sind es automatisch.
+- IODDs in ISO-8859-1 / Windows-1252 werden automatisch nach UTF-8 umgewandelt.
+- Nicht lesbare XML-Dateien stehen als Warnung im Log
+  (`docker compose logs iodd-mirror`).
 - Neue Dateien werden nach spaetestens 60 Sekunden erkannt, kein Neustart
   noetig. Uebersicht: `http://<host>:8080/` (falls der Port freigegeben ist)
   oder `docker compose logs iodd-mirror`.
@@ -22,9 +27,11 @@ Repository eingecheckt.
 
 ```bash
 docker compose build iodd-mirror
-docker compose run --rm -v "$PWD/iodd:/data" iodd-mirror fetch -out /data 310:967 42:278531
+docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$PWD/iodd:/data" \
+  iodd-mirror fetch -out /data 310:967 42:278531
 # oder mit Liste:
-docker compose run --rm -v "$PWD/iodd:/data" iodd-mirror fetch -out /data -list /data/geraete.example.txt
+docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$PWD/iodd:/data" \
+  iodd-mirror fetch -out /data -list /data/geraete.example.txt
 ```
 
 `VENDOR:DEVICE` sind die IO-Link-IDs (Vendor ID und Device ID). Der Connector
