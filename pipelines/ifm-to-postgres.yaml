@@ -1,0 +1,56 @@
+# ifm IO-Link-Master -> Postgres
+# Liest alle Ports eines ifm IO-Link-Masters (z. B. AL1350, AL1352). Die
+# Gerätebeschreibungen (IODDs) kommen vom lokalen iodd-mirror, nicht aus dem
+# Internet (siehe iodd/README.md). Sensoren ohne IODD liefern Rohdaten.
+#
+# Jeder Messwert wird eine Zeile: tag = "port<Nr>.<Messgroesse>",
+# z. B. "port1.Temperature". Bei Bluetooth-Mesh (EIO404) steht der Adapter
+# davor: "mesh<Adapter>.port1.Temperature".
+# Ohne IODD liefert das Plugin "raw_sensor_output" (base64); gespeichert wird
+# der Hex-Wert als value_text unter "port<Nr>.raw".
+#
+# Anpassen: IFM_MASTER_ADDRESS, MACHINE_NAME (siehe .env.example)
+# Starten:  PIPELINE=/etc/opairs/pipelines/ifm-to-postgres.yaml docker compose up -d
+
+input:
+  sensorconnect:
+    device_address: '${IFM_MASTER_ADDRESS:192.168.0.1}'
+    iodd_api: '${IODD_API:http://iodd-mirror:8080}'
+
+pipeline:
+  processors:
+    - mapping: |
+        let ts = now()
+        let machine = env("MACHINE_NAME").or("unknown")
+        let mesh = meta("sensorconnect_bluetooth_meshadapter").or("none")
+        let meshp = if $mesh == "none" || $mesh == "" { "" } else { "mesh" + $mesh + "." }
+        let prefix = $meshp + "port" + meta("sensorconnect_port_number").or("0")
+        let fields = if this.type() == "object" {
+          this.key_values().sort_by(kv -> kv.key).map_each(kv -> if kv.key == "raw_sensor_output" && kv.value.type() == "string" {
+            {"key": "raw", "value": kv.value.decode("base64").string().catch(kv.value)}
+          } else { kv })
+        } else {
+          [{"key": "raw", "value": this}]
+        }
+        root = $fields.map_each(kv -> {
+          "ts": $ts,
+          "machine": $machine,
+          "tag": $prefix + "." + kv.key,
+          "value": if kv.value.type() == "number" { kv.value } else if kv.value.type() == "bool" { if kv.value { 1 } else { 0 } } else { null },
+          "value_text": if kv.value.type() == "string" { kv.value } else if ["number", "bool", "null"].contains(kv.value.type()) { null } else { kv.value.string() },
+          "quality": "Good"
+        })
+    # Ein Messwert je Nachricht
+    - unarchive:
+        format: json_array
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s

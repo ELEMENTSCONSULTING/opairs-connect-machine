@@ -1,0 +1,46 @@
+# Unit-Tests fuer das Mapping (ohne Server, ohne Datenbank):
+#   docker run --rm -v "$PWD/pipelines:/p:ro" opairs-connect-machine:dev test /p/...
+tests:
+  - name: Zahl mit Quellzeitstempel
+    environment:
+      MACHINE_NAME: m1
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '21.5'
+        metadata:
+          opcua_tag_name: temperature
+          opcua_source_timestamp: '2026-10-31T10:00:00.000000Z'
+          opcua_attr_statuscode: Good
+    output_batches:
+      - - bloblang: 'this.ts == "2026-10-31T10:00:00.000000Z" && this.machine == "m1" && this.tag == "temperature" && this.value == 21.5 && this.value_text == null && this.quality == "Good"'
+
+  - name: Bool als 1/0, Text als value_text
+    environment:
+      MACHINE_NAME: m1
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: 'true'
+        metadata:
+          opcua_tag_name: running
+      - content: '"Auto"'
+        metadata:
+          opcua_tag_name: mode
+    output_batches:
+      - - bloblang: 'this.tag == "running" && this.value == 1 && this.value_text == null'
+        - bloblang: 'this.tag == "mode" && this.value == null && this.value_text == "Auto"'
+
+  - name: Fehlender oder Null-Zeitstempel ergibt jetzt
+    environment:
+      MACHINE_NAME: m1
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '1'
+        metadata:
+          opcua_tag_name: a
+          opcua_source_timestamp: '0001-01-01T00:00:00.000000Z'
+      - content: '2'
+        metadata:
+          opcua_tag_name: b
+    output_batches:
+      - - bloblang: 'this.tag == "a" && !this.ts.has_prefix("0001") && this.ts.type() == "string"'
+        - bloblang: 'this.tag == "b" && this.ts.type() == "string"'

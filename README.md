@@ -11,8 +11,9 @@ Basis ist **benthos-umh** (Apache-2.0, UMH Systems GmbH), siehe
 
 ```
 Maschinen --> connector (benthos-umh) --> Postgres --> Superset
-                  ^                           ^
-            ./pipelines (YAML)          maintenance (alle 5 Min)
+                  ^         ^                 ^
+       ./pipelines (YAML)   iodd-mirror   maintenance (alle 5 Min)
+                            (./iodd)
 ```
 
 ## Schnellstart
@@ -32,13 +33,37 @@ Knoten (`nodeIDs`) in der Datei anpassen und `docker compose up -d` ausfuehren.
 Weitere Protokolle: siehe `docs/input/` (S7, Modbus, EtherNet/IP, ifm IO-Link,
 Beckhoff ADS, Sparkplug B).
 
+| Pipeline | Quelle |
+|---|---|
+| `selftest.yaml` | Testwerte, keine Maschine noetig |
+| `opcua-to-postgres.yaml` | OPC-UA-Server |
+| `ifm-to-postgres.yaml` | ifm IO-Link-Master (AL1350, AL1352, ...), IODDs vom lokalen Mirror |
+
+## IO-Link: lokaler IODD-Mirror (offline)
+
+Das sensorconnect-Plugin braucht fuer jeden IO-Link-Sensor die
+Geraetebeschreibung (IODD) und laedt sie standardmaessig ueber einen
+UMH-Server aus dem Internet. Der Dienst **`iodd-mirror`** (`iodd_mirror/`)
+bildet genau die zwei Abfragen nach, die das Plugin stellt, und liefert die
+IODDs aus dem Ordner `./iodd`. Der Connector braucht damit kein Internet, und
+die automatische Erkennung der Sensoren bleibt erhalten.
+
+- IODD-Dateien (ZIP oder XML) nach `./iodd` legen, Anleitung und
+  Download-Befehl in [`iodd/README.md`](iodd/README.md).
+- Sensoren ohne IODD liefern Rohdaten (Hex), der Connector laeuft weiter.
+- Die Dateien muessen fuer andere lesbar sein (der Dienst laeuft nicht als
+  root), z. B. `chmod -R a+rX iodd`.
+- Der Mirror ist mit Go-Tests gegen den echten Plugin-Code abgesichert
+  (`iodd_mirror/plugin_compat_test.go`, laeuft in der CI).
+
 ## Tests
 
 | Befehl | Prueft |
 |---|---|
 | `./scripts/smoke-test.sh` | baut und startet den Stack, wartet auf Selbsttest-Daten, prueft Partitionen und Minutenwerte, ruft danach die SQL-Tests auf |
+| `docker run --rm -v "$PWD/pipelines:/p:ro" opairs-connect-machine:dev test /p/...` | Unit-Tests der Pipeline-Mappings (`pipelines/*_benthos_test.yaml`) |
 | `./scripts/test-sql.sh` | SQL-Regressionstests (`sql/tests/`) gegen die laufende Datenbank; laufen in einer Transaktion mit ROLLBACK, es bleiben keine Daten zurueck |
-| CI (`.github/workflows/ci.yml`) | bei jedem Pull Request: Image bauen, `benthos lint` fuer alle Pipelines, Smoke-Test, SQL-Tests |
+| CI (`.github/workflows/ci.yml`) | bei jedem Pull Request: Images bauen, IODD-Mirror-Tests (inkl. Plugin-Kompatibilitaet), `benthos lint`, Pipeline-Unit-Tests, Smoke-Test, SQL-Tests |
 
 Die CI laeuft nur, wenn GitHub Actions fuer das Repository aktiviert ist
 (Settings > Actions > General).
@@ -132,3 +157,6 @@ steht unter EPL-2.0, nicht unter Apache-2.0.
 - Das Image enthaelt alle Upstream-Plugins und das Redpanda-Free-Bundle; eine
   Reduktion auf die benoetigten Plugins ist offen.
 - ERP-Anbindungen (SAP, Infor, proALPHA) sind nicht enthalten.
+- Die ifm-Pipeline ist mit Unit-Tests und `lint` geprueft, aber noch nicht
+  gegen einen echten IO-Link-Master gelaufen. `iodd-mirror fetch` ist gegen
+  eine nachgebildete Quelle getestet, nicht gegen den echten IODDfinder.

@@ -1,0 +1,42 @@
+# Unit-Tests fuer das Mapping (ohne Geraet, ohne Datenbank):
+#   docker run --rm -v "$PWD/pipelines:/p:ro" opairs-connect-machine:dev test /p/...
+tests:
+  - name: IODD-dekodierte Werte werden eine Zeile je Messgroesse
+    environment:
+      MACHINE_NAME: m1
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '{"Temperature": 39.4, "OUT1": true, "Device status": "OK", "Info": {"a": 1}}'
+        metadata:
+          sensorconnect_port_number: "2"
+    output_batches:
+      - - bloblang: 'this.tag == "port2.Device status" && this.value == null && this.value_text == "OK" && this.machine == "m1"'
+        - bloblang: 'this.tag == "port2.Info" && this.value == null && this.value_text == "{\"a\":1}"'
+        - bloblang: 'this.tag == "port2.OUT1" && this.value == 1 && this.value_text == null'
+        - bloblang: 'this.tag == "port2.Temperature" && this.value == 39.4 && this.value_text == null && this.quality == "Good" && this.ts.type() == "string"'
+
+  # So liefert das Plugin Rohdaten ohne IODD ([]byte -> base64 in JSON),
+  # vgl. sensorconnect_plugin/sensorconnect_test.go
+  - name: Rohdaten ohne IODD werden als Hex gespeichert
+    environment:
+      MACHINE_NAME: m1
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '{"raw_sensor_output": "MDAwMEZDMDAwMDAyRkYwMDAwMDBGRjAwMDE4RkZGMDAwMDI3RkYwMw=="}'
+        metadata:
+          sensorconnect_port_number: "4"
+          sensorconnect_bluetooth_meshadapter: none
+    output_batches:
+      - - bloblang: 'this.tag == "port4.raw" && this.value == null && this.value_text == "0000FC000002FF000000FF00018FFF000027FF03"'
+
+  - name: Digitaler Eingang und Bluetooth-Mesh-Adapter im Tag
+    environment:
+      MACHINE_NAME: m1
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '{"pin2in": 1}'
+        metadata:
+          sensorconnect_port_number: "1"
+          sensorconnect_bluetooth_meshadapter: "3"
+    output_batches:
+      - - bloblang: 'this.tag == "mesh3.port1.pin2in" && this.value == 1'
