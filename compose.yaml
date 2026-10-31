@@ -25,7 +25,9 @@ services:
       OPAIRS_WRITER_PASSWORD: ${OPAIRS_WRITER_PASSWORD:?OPAIRS_WRITER_PASSWORD fehlt (.env)}
       OPAIRS_READER_PASSWORD: ${OPAIRS_READER_PASSWORD:?OPAIRS_READER_PASSWORD fehlt (.env)}
     volumes:
-      - opairs-pgdata:/var/lib/postgresql/data
+      # Standard: Docker-Volume. Mit PGDATA_DIR in .env (absoluter Pfad, z. B.
+      # /srv/opairs/opairs-connect-db) liegen die Daten in einem Ordner auf dem Host.
+      - ${PGDATA_DIR:-opairs-pgdata}:/var/lib/postgresql/data
       - ./sql:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # -h 127.0.0.1 erzwingt TCP: waehrend der Erstinitialisierung lauscht
