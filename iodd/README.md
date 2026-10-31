@@ -27,11 +27,11 @@ Repository eingecheckt.
 
 ```bash
 docker compose build iodd-mirror
-docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$PWD/iodd:/data" \
-  iodd-mirror fetch -out /data 310:967 42:278531
+docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$PWD/iodd:/fetch" \
+  iodd-mirror fetch -out /fetch 310:967 42:278531
 # oder mit Liste:
-docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$PWD/iodd:/data" \
-  iodd-mirror fetch -out /data -list /data/geraete.example.txt
+docker compose run --rm --no-deps --user "$(id -u):$(id -g)" -v "$PWD/iodd:/fetch" \
+  iodd-mirror fetch -out /fetch -list /fetch/geraete.example.txt
 ```
 
 `VENDOR:DEVICE` sind die IO-Link-IDs (Vendor ID und Device ID). Der Connector

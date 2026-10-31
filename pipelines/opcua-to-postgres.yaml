@@ -26,7 +26,18 @@ pipeline:
         root.ts = if $src_ts == "" || $src_ts.has_prefix("0001") { now() } else { $src_ts }
         root.machine = env("MACHINE_NAME").or("unknown")
         root.tag = meta("opcua_tag_name").or("unknown")
-        root.quality = meta("opcua_attr_statuscode")
+
+        # Qualitaet vereinfachen: das Plugin liefert Langtext wie
+        # "The operation succeeded. StatusGood (0x0)". Massgeblich ist der
+        # Statuscode in Klammern, seine obersten zwei Bits geben die
+        # Schwere an (00 Good, 01 Uncertain, 10/11 Bad).
+        # Ergebnis: "Good", "Uncertain 0x40900000", "Bad 0x80340000".
+        let qs = meta("opcua_attr_statuscode").or("")
+        let hexm = $qs.re_find_all_submatch("0x([0-9A-Fa-f]+)")
+        let hex = if $hexm.length() > 0 { $hexm.index(-1).index(1).uppercase() } else { "" }
+        let first = if $hex.length() == 8 { $hex.slice(0, 1) } else { "0" }
+        let sev = if $hex == "" { "" } else if ["0", "1", "2", "3"].contains($first) { "Good" } else if ["4", "5", "6", "7"].contains($first) { "Uncertain" } else { "Bad" }
+        root.quality = if $qs == "" { null } else if $sev == "" { $qs } else if $sev == "Good" { "Good" } else { $sev + " 0x" + $hex }
 
         # Zahlen und Bool nach value (Bool als 1/0), alles andere als Text.
         # Hinweis: kein match-Block verwenden, dort zeigt `this` auf den

@@ -14,7 +14,8 @@ CREATE SCHEMA IF NOT EXISTS opairs;
 -- Rohdaten: schmale Tabelle, partitioniert nach Zeit (taeglich).
 --   value      numerische Werte (Bool wird als 1/0 gespeichert)
 --   value_text Werte, die keine Zahl sind (Text, JSON)
---   quality    Qualitaetsangabe der Quelle (z. B. OPC-UA-Statuscode)
+--   quality    Qualitaet der Quelle: "Good", "Uncertain 0x...", "Bad 0x..."
+--              oder NULL (Quelle ohne Qualitaetsangabe, z. B. Modbus, S7)
 CREATE TABLE IF NOT EXISTS opairs.machine_data (
     ts         timestamptz      NOT NULL,
     machine    text             NOT NULL,
@@ -49,6 +50,21 @@ CREATE TABLE IF NOT EXISTS opairs.machine_data_1min (
     sample_count bigint           NOT NULL,
     PRIMARY KEY (machine, tag, bucket)
 );
+
+-- Anzahl Werte je Minute, die nicht "Good" waren (Uncertain/Bad). Sie
+-- fliessen nicht in avg/min/max/sample_count ein.
+ALTER TABLE opairs.machine_data_1min
+    ADD COLUMN IF NOT EXISTS bad_count bigint NOT NULL DEFAULT 0;
+
+-- Ist ein Qualitaetswert "gut"? NULL (Quelle ohne Qualitaet) gilt als gut.
+-- Erkennt auch den Langtext des OPC-UA-Plugins ("... StatusGood (0x0)"),
+-- der vor der Vereinfachung in der Pipeline gespeichert wurde.
+CREATE OR REPLACE FUNCTION opairs.is_good_quality(q text)
+RETURNS boolean
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$
+    SELECT q IS NULL OR q ~* '^\s*good' OR q ~ 'StatusGood'
+$$;
 
 -- Zeitfilter in Superset, Aufbewahrung und Ermittlung des letzten Buckets
 CREATE INDEX IF NOT EXISTS machine_data_1min_bucket_idx
@@ -180,7 +196,8 @@ $$;
 -- Werte). War die Wartung laenger ausgefallen, wird ab dem letzten
 -- vorhandenen Bucket aufgeholt, hoechstens jedoch `max_catchup` zurueck.
 -- Werte mit Zeitstempel in der Zukunft (falsche Uhr an der Quelle) werden
--- ignoriert. Voraussetzung: Rohdaten-Aufbewahrung > lookback.
+-- ignoriert. Nur Werte mit guter Qualitaet gehen in avg/min/max/sample_count
+-- ein; die uebrigen zaehlt bad_count. Voraussetzung: Rohdaten-Aufbewahrung > lookback.
 CREATE OR REPLACE FUNCTION opairs.aggregate_1min(
     lookback    interval DEFAULT interval '2 hours',
     max_catchup interval DEFAULT interval '7 days'
@@ -209,19 +226,25 @@ BEGIN
     start_ts := greatest(start_ts, date_trunc('minute', now() - max_catchup));
 
     INSERT INTO opairs.machine_data_1min
-           (bucket, machine, tag, avg_value, min_value, max_value, sample_count)
+           (bucket, machine, tag, avg_value, min_value, max_value, sample_count, bad_count)
     SELECT date_trunc('minute', ts), machine, tag,
-           avg(value), min(value), max(value), count(*)
-      FROM opairs.machine_data
-     WHERE ts >= start_ts
-       AND ts <  end_ts
-       AND value IS NOT NULL
+           avg(value)   FILTER (WHERE good),
+           min(value)   FILTER (WHERE good),
+           max(value)   FILTER (WHERE good),
+           count(*)     FILTER (WHERE good),
+           count(*)     FILTER (WHERE NOT good)
+      FROM (SELECT ts, machine, tag, value, opairs.is_good_quality(quality) AS good
+              FROM opairs.machine_data
+             WHERE ts >= start_ts
+               AND ts <  end_ts
+               AND value IS NOT NULL) d
      GROUP BY 1, 2, 3
     ON CONFLICT (machine, tag, bucket) DO UPDATE
        SET avg_value    = EXCLUDED.avg_value,
            min_value    = EXCLUDED.min_value,
            max_value    = EXCLUDED.max_value,
-           sample_count = EXCLUDED.sample_count;
+           sample_count = EXCLUDED.sample_count,
+           bad_count    = EXCLUDED.bad_count;
     GET DIAGNOSTICS n = ROW_COUNT;
     RETURN n;
 END;
@@ -267,9 +290,10 @@ END;
 $$;
 
 -- Fuer Superset: letzter Minutenwert je Maschine und Tag (letzte 24 Stunden).
+-- Neue Spalten nur hinten anhaengen (CREATE OR REPLACE VIEW erlaubt nichts anderes).
 CREATE OR REPLACE VIEW opairs.v_latest_1min AS
 SELECT DISTINCT ON (machine, tag)
-       machine, tag, bucket, avg_value, min_value, max_value, sample_count
+       machine, tag, bucket, avg_value, min_value, max_value, sample_count, bad_count
   FROM opairs.machine_data_1min
  WHERE bucket > now() - interval '24 hours'
  ORDER BY machine, tag, bucket DESC;

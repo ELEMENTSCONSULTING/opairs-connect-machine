@@ -10,7 +10,7 @@ tests:
         metadata:
           opcua_tag_name: temperature
           opcua_source_timestamp: '2026-10-31T10:00:00.000000Z'
-          opcua_attr_statuscode: Good
+          opcua_attr_statuscode: 'The operation succeeded. StatusGood (0x0)'
     output_batches:
       - - bloblang: 'this.ts == "2026-10-31T10:00:00.000000Z" && this.machine == "m1" && this.tag == "temperature" && this.value == 21.5 && this.value_text == null && this.quality == "Good"'
 
@@ -44,3 +44,35 @@ tests:
     output_batches:
       - - bloblang: 'this.tag == "a" && !this.ts.has_prefix("0001") && this.ts.type() == "string"'
         - bloblang: 'this.tag == "b" && this.ts.type() == "string"'
+
+  # Statustexte wie sie das Plugin liefert (beobachtet mit Microsoft OPC PLC)
+  - name: Qualitaet wird auf Good/Uncertain/Bad vereinfacht
+    environment:
+      MACHINE_NAME: m1
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '1'
+        metadata:
+          opcua_tag_name: good
+          opcua_attr_statuscode: 'The operation succeeded. StatusGood (0x0)'
+      - content: '2'
+        metadata:
+          opcua_tag_name: uncertain
+          opcua_attr_statuscode: 'Whatever was updating this value has stopped doing so. StatusUncertainLastUsableValue (0x40900000)'
+      - content: '3'
+        metadata:
+          opcua_tag_name: bad
+          opcua_attr_statuscode: 'The node id refers to a node that does not exist in the server address space. StatusBadNodeIDUnknown (0x80340000)'
+      - content: '4'
+        metadata:
+          opcua_tag_name: ohne
+      - content: '5'
+        metadata:
+          opcua_tag_name: kurz
+          opcua_attr_statuscode: Good
+    output_batches:
+      - - bloblang: 'this.tag == "good" && this.quality == "Good"'
+        - bloblang: 'this.tag == "uncertain" && this.quality == "Uncertain 0x40900000"'
+        - bloblang: 'this.tag == "bad" && this.quality == "Bad 0x80340000"'
+        - bloblang: 'this.tag == "ohne" && this.quality == null'
+        - bloblang: 'this.tag == "kurz" && this.quality == "Good"'
