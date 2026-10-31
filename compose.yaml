@@ -50,16 +50,40 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      iodd-mirror:
+        condition: service_healthy
     environment:
       POSTGRES_DSN: postgres://opairs_writer:${OPAIRS_WRITER_PASSWORD}@db:5432/${POSTGRES_DB:-opairs}?sslmode=disable
       MACHINE_NAME: ${MACHINE_NAME:-machine-01}
       OPCUA_ENDPOINT: ${OPCUA_ENDPOINT:-opc.tcp://host.docker.internal:4840}
+      IFM_MASTER_ADDRESS: ${IFM_MASTER_ADDRESS:-192.168.0.1}
+      IODD_API: ${IODD_API:-http://iodd-mirror:8080}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./pipelines:/etc/opairs/pipelines:ro
     command: ["-c", "${PIPELINE:-/etc/opairs/pipelines/selftest.yaml}"]
     # Benthos-Status: http://<host>:4195/ready (Port bei Bedarf freigeben)
+
+  # Lokaler IODDfinder-Ersatz fuer ifm IO-Link-Master (siehe iodd/README.md).
+  # Laeuft ohne Internet; IODD-Dateien liegen in ./iodd.
+  iodd-mirror:
+    image: opairs-iodd-mirror:${APP_VERSION:-dev}
+    build:
+      context: .
+      dockerfile: iodd_mirror/Dockerfile
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - ./iodd:/data:ro
+    healthcheck:
+      test: ["CMD", "/iodd-mirror", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    # Uebersicht der IODDs unter http://<host>:8080/ (Port bei Bedarf freigeben)
+    # ports:
+    #   - "127.0.0.1:8080:8080"
 
   # Beim Start: Schema anwenden (Updates). Danach alle 5 Minuten: Partitionen im
   # Voraus anlegen, alte Rohdaten loeschen, Minutenwerte berechnen.

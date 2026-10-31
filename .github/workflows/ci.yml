@@ -30,17 +30,32 @@ jobs:
         run: cp .env.example .env
 
       - name: Image bauen
-        run: scripts/ci-run.sh "Image-Build" docker compose build connector
+        run: scripts/ci-run.sh "Image-Build" docker compose build connector iodd-mirror
+
+      - name: IODD-Mirror Go-Tests (inkl. Kompatibilitaet mit sensorconnect-Plugin)
+        run: |
+          scripts/ci-run.sh "IODD-Mirror Go-Tests" docker run --rm \
+            -v "$PWD:/src" -w /src -e CGO_ENABLED=1 \
+            golang:1.27.1@sha256:3680233e3204827fbdc66088528ae6d4b3d034f51d03a99d454f6de034888244 \
+            go test -count=1 -race -tags plugincompat ./iodd_mirror/...
 
       - name: Pipelines pruefen (benthos lint)
         run: |
           for f in pipelines/*.yaml; do
+            case "$f" in *_benthos_test.yaml) continue;; esac
             scripts/ci-run.sh "Lint $(basename "$f")" docker run --rm \
               -e POSTGRES_DSN=postgres://u:p@db:5432/opairs \
               -e MACHINE_NAME=ci -e OPCUA_ENDPOINT=opc.tcp://localhost:4840 \
               -v "$PWD/pipelines:/p:ro" \
               opairs-connect-machine:dev lint "/p/$(basename "$f")"
           done
+
+      - name: Pipeline-Unit-Tests (Mappings)
+        run: |
+          scripts/ci-run.sh "Pipeline-Unit-Tests" docker run --rm \
+            -e POSTGRES_DSN=postgres://u:p@db:5432/opairs \
+            -v "$PWD/pipelines:/p:ro" \
+            opairs-connect-machine:dev test /p/...
 
       - name: Smoke-Test und SQL-Tests
         run: scripts/ci-run.sh "Smoke-Test" ./scripts/smoke-test.sh

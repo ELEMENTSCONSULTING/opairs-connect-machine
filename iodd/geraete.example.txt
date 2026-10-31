@@ -1,0 +1,4 @@
+# Liste fuer "iodd-mirror fetch -list": eine Zeile je Geraetetyp, VENDOR:DEVICE
+# Die IDs zeigt der IO-Link-Master an bzw. stehen in den Connector-Logs
+# ("IO-Link device found ... Device ID: ..., Vendor ID: ...").
+310:967      # ifm DTI410 (Beispiel)

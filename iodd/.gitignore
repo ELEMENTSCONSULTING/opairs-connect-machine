@@ -1,0 +1,5 @@
+# Kunden-IODDs nicht ins Repository
+*
+!.gitignore
+!README.md
+!geraete.example.txt

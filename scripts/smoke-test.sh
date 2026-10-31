@@ -17,7 +17,7 @@ q() { docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB
 fail() {
     echo "FEHLER: $1"
     docker compose ps
-    docker compose logs --no-color --tail=80 connector maintenance db
+    docker compose logs --no-color --tail=80 connector maintenance db iodd-mirror
     exit 1
 }
 
@@ -40,6 +40,9 @@ echo "Rohdaten-Zeilen: $rows | Partitionen: $parts | Minutenwerte: $agg | Tags: 
 [ "$parts" -ge 9 ] || fail "zu wenige Partitionen ($parts)"
 [ "$agg"   -gt 0 ] || fail "keine Minutenwerte berechnet"
 [ "$tags"  -ge 2 ] || fail "Selbsttest liefert nicht die erwarteten Tags ($tags)"
+
+docker compose exec -T iodd-mirror /iodd-mirror healthcheck || fail "iodd-mirror nicht erreichbar"
+echo "iodd-mirror: erreichbar"
 
 ./scripts/test-sql.sh || fail "SQL-Regressionstests fehlgeschlagen"
 echo "Smoke-Test: OK"
