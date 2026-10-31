@@ -74,7 +74,7 @@ Die CI laeuft nur, wenn GitHub Actions fuer das Repository aktiviert ist
 |---|---|
 | `opairs.machine_data` | Rohdaten, schmal (`ts, machine, tag, value, value_text, quality`), **taeglich partitioniert** |
 | `opairs.machine_data_default` | Sicherheitsnetz, falls eine Tagespartition fehlt (wird bei der Wartung aufgeloest) |
-| `opairs.machine_data_1min` | Minutenwerte (avg/min/max/Anzahl) fuer Dashboards |
+| `opairs.machine_data_1min` | Minutenwerte (avg/min/max/Anzahl) fuer Dashboards; nur Werte mit guter Qualitaet, `bad_count` zaehlt Uncertain/Bad |
 | `opairs.v_latest_1min` | letzter Minutenwert je Maschine und Tag (letzte 24 h) |
 | `opairs.maintain_partitions()`, `aggregate_1min()`, `purge_aggregates()` | Wartungsschritte (siehe unten) |
 | `opairs.run_maintenance()` | alle Wartungsschritte in einem Aufruf |
@@ -84,6 +84,10 @@ Zeitbereiche, `bucket` auf den Minutenwerten.
 
 Werte mit Zeitstempel in der Zukunft (falsche Uhr an der Quelle) werden
 gespeichert, aber nicht aggregiert.
+
+`quality` ist `Good`, `Uncertain 0x...` oder `Bad 0x...` (OPC UA) bzw. NULL
+bei Quellen ohne Qualitaetsangabe. Nur `Good` und NULL fliessen in die
+Minutenwerte ein (`opairs.is_good_quality()`).
 
 Es gibt bewusst **keine Kompression und keine Continuous Aggregates**
 (TimescaleDB-Community-Funktionen stehen unter der Timescale License). Rohdaten

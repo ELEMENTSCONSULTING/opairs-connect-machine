@@ -118,6 +118,32 @@ BEGIN
     END IF;
 END $$;
 
+-- 4b) Qualitaet: nur gute Werte in avg/min/max/sample_count, Rest in bad_count.
+--     Kurzform aus der Pipeline und Langtext des Plugins werden erkannt.
+INSERT INTO opairs.machine_data (ts, machine, tag, value, quality) VALUES
+    (date_trunc('minute', now()) - interval '1 minute' + interval '1 second', '__test__', 'q', 10, 'Good'),
+    (date_trunc('minute', now()) - interval '1 minute' + interval '2 seconds', '__test__', 'q', 20, 'The operation succeeded. StatusGood (0x0)'),
+    (date_trunc('minute', now()) - interval '1 minute' + interval '3 seconds', '__test__', 'q', 30, NULL),
+    (date_trunc('minute', now()) - interval '1 minute' + interval '4 seconds', '__test__', 'q', 999, 'Uncertain 0x40900000'),
+    (date_trunc('minute', now()) - interval '1 minute' + interval '5 seconds', '__test__', 'q', 999, 'Whatever was updating this value has stopped doing so. StatusUncertainLastUsableValue (0x40900000)'),
+    (date_trunc('minute', now()) - interval '1 minute' + interval '6 seconds', '__test__', 'q', 999, 'Bad 0x80340000'),
+    (date_trunc('minute', now()) - interval '1 minute' + interval '7 seconds', '__test__', 'onlybad', 5, 'Bad 0x80340000');
+SELECT opairs.aggregate_1min();
+DO $$
+DECLARE r record;
+BEGIN
+    SELECT * INTO r FROM opairs.machine_data_1min WHERE machine = '__test__' AND tag = 'q';
+    IF r.sample_count IS DISTINCT FROM 3 OR r.bad_count IS DISTINCT FROM 3
+       OR r.avg_value IS DISTINCT FROM 20 OR r.max_value IS DISTINCT FROM 30 THEN
+        RAISE EXCEPTION 'TEST 4b: erwartet good=3 bad=3 avg=20 max=30, erhalten good=% bad=% avg=% max=%',
+            r.sample_count, r.bad_count, r.avg_value, r.max_value;
+    END IF;
+    SELECT * INTO r FROM opairs.machine_data_1min WHERE machine = '__test__' AND tag = 'onlybad';
+    IF r.sample_count IS DISTINCT FROM 0 OR r.bad_count IS DISTINCT FROM 1 OR r.avg_value IS NOT NULL THEN
+        RAISE EXCEPTION 'TEST 4b: Minute nur mit schlechten Werten falsch: %', r;
+    END IF;
+END $$;
+
 -- 5) Rollen: Writer darf nur einfuegen, Reader nur lesen
 SET ROLE opairs_writer;
 INSERT INTO opairs.machine_data (ts, machine, tag, value) VALUES (now(), '__test__', 'writer', 1);
