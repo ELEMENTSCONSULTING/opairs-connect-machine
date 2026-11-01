@@ -46,10 +46,7 @@ jobs:
           [ "$n" -ge 5 ] || { echo "::error title=IODD-Mirror::nur $n Plugin-Kompatibilitaetstests gelaufen"; exit 1; }
 
       - name: Superset-Dashboard (ZIP passt zum Generator)
-        run: |
-          python3 superset/build_dashboard.py
-          git diff --exit-code --stat superset/OPAIRS_Connect_Dashboard.zip \
-            || { echo "::error title=Superset-Dashboard::ZIP veraltet: python3 superset/build_dashboard.py ausfuehren und einchecken"; exit 1; }
+        run: scripts/ci-run.sh "Superset-Dashboard" python3 superset/build_dashboard.py --check
 
       - name: Pipelines pruefen (benthos lint)
         run: |

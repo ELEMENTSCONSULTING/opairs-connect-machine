@@ -566,7 +566,12 @@ def build_dashboard():
     }
 
 
-def build(uri, out):
+def members(data):
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        return {n: z.read(n) for n in z.namelist()}
+
+
+def build(uri, out, check=False):
     root = "dashboard_export_opairs_connect"
     database = {
         "database_name": DB_NAME, "sqlalchemy_uri": uri, "cache_timeout": None,
@@ -594,6 +599,14 @@ def build(uri, out):
             info = zipfile.ZipInfo(f"{root}/{name}", date_time=(2026, 11, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             z.writestr(info, json.dumps(content, ensure_ascii=False, indent=1) + "\n")
+    if check:
+        # Inhalt vergleichen, nicht Bytes: Deflate unterscheidet sich je zlib-Version
+        old = pathlib.Path(out)
+        if not old.exists() or members(old.read_bytes()) != members(buf.getvalue()):
+            raise SystemExit(f"{out} ist veraltet: python3 superset/build_dashboard.py "
+                             "ausfuehren und die ZIP einchecken")
+        print(f"{out}: aktuell")
+        return
     pathlib.Path(out).write_bytes(buf.getvalue())
     print(f"{out}: {len(CHARTS)} Charts, {len(DATASETS)} Datasets")
 
@@ -602,5 +615,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--uri", default=DEFAULT_URI, help="SQLAlchemy-URI der Datenbank")
     ap.add_argument("--out", default=str(OUT))
+    ap.add_argument("--check", action="store_true",
+                    help="nur pruefen, ob die vorhandene ZIP zum Generator passt")
     a = ap.parse_args()
-    build(a.uri, a.out)
+    build(a.uri, a.out, a.check)

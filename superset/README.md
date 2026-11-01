@@ -47,8 +47,8 @@ python3 superset/build_dashboard.py
 ```
 
 Charts, Filter und Layout stehen dort als Python-Aufrufe. Die UUIDs sind fest,
-ein Neuaufbau erzeugt dieselben Objekte. Die CI prueft, dass die eingecheckte
-ZIP zum Generator passt. Nach einer Aenderung also die ZIP neu bauen und
+ein Neuaufbau erzeugt dieselben Objekte. Die CI prueft mit `--check`, dass die
+eingecheckte ZIP zum Generator passt. Nach einer Aenderung also die ZIP neu bauen und
 mit einchecken.
 
 Aenderungen, die nur in Superset gemacht werden (Edit dashboard), bleiben
