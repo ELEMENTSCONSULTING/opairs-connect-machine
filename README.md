@@ -189,6 +189,9 @@ Wird auch `compose.override.yaml` genutzt, diese in `COMPOSE_FILE` anhaengen
 SQLAlchemy-URI in Superset:
 `postgresql://opairs_reader:<OPAIRS_READER_PASSWORD>@opairs-connect-db:5432/opairs`
 
+Fertiges Dashboard zum Importieren: `superset/OPAIRS_Connect_Dashboard.zip`
+(Anleitung in `superset/README.md`).
+
 Der Datenbankdienst heisst bewusst `opairs-connect-db` und nicht `db`: In
 gemeinsam genutzten Netzen gibt es oft schon andere Dienste namens `db`.
 

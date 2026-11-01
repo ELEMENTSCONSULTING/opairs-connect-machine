@@ -45,6 +45,12 @@ jobs:
           echo "::notice title=IODD-Mirror Go-Tests (${n} Plugin-Tests)::${summary}"
           [ "$n" -ge 5 ] || { echo "::error title=IODD-Mirror::nur $n Plugin-Kompatibilitaetstests gelaufen"; exit 1; }
 
+      - name: Superset-Dashboard (ZIP passt zum Generator)
+        run: |
+          python3 superset/build_dashboard.py
+          git diff --exit-code --stat superset/OPAIRS_Connect_Dashboard.zip \
+            || { echo "::error title=Superset-Dashboard::ZIP veraltet: python3 superset/build_dashboard.py ausfuehren und einchecken"; exit 1; }
+
       - name: Pipelines pruefen (benthos lint)
         run: |
           for f in pipelines/*.yaml; do
@@ -72,6 +78,9 @@ jobs:
           n=$(docker compose exec -T opairs-connect-db psql -U opairs -d opairs -tAc "SELECT count(*) FROM opairs.machine_data_1min WHERE machine LIKE 'demo-%'")
           echo "Minutenwerte Demo: $n"
           [ "$n" -gt 20000 ] || { echo "::error title=Demo::zu wenige Minutenwerte ($n)"; exit 1; }
+          bad=$(docker compose exec -T opairs-connect-db psql -U opairs -d opairs -tAc "SELECT COALESCE(sum(bad_count), 0) FROM opairs.machine_data_1min WHERE machine LIKE 'demo-cnc%'")
+          echo "Werte Uncertain (CNC-Vibration): $bad"
+          [ "$bad" -gt 100 ] || { echo "::error title=Demo::keine Uncertain-Spitzen in den CNC-Daten ($bad)"; exit 1; }
           scripts/ci-run.sh "Demo-Entfernen" ./scripts/demo.sh remove
 
       - name: Logs bei Fehler
