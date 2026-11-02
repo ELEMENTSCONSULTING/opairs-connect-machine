@@ -11,29 +11,27 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by ELEMENTS Consulting GmbH (2026): nur noch die Plugins, die
+// OPAIRS Connect ohne UMH Core einsetzt. Entfernt: uns, topic_browser,
+// stream_processor, classic_to_core (brauchen UMH Core bzw. Kafka/Redpanda),
+// historian (TimescaleDB), snowflake_put (Cloud), RuneRoven benthosAlarm und
+// benthosSMTP. Der Quellcode der Plugins bleibt fuer Upstream-Updates im Repo.
 
 package bundle
 
 import (
-	_ "github.com/RuneRoven/benthosAlarm"
-	_ "github.com/RuneRoven/benthosSMTP"
 	// Fix for ENG-752
 	_ "github.com/redpanda-data/connect/public/bundle/free/v4"
 
 	_ "github.com/united-manufacturing-hub/benthos-umh/beckhoff_ads_plugin"
-	_ "github.com/united-manufacturing-hub/benthos-umh/classic_to_core_plugin"
 	_ "github.com/united-manufacturing-hub/benthos-umh/downsampler_plugin"
 	_ "github.com/united-manufacturing-hub/benthos-umh/eip_plugin"
-	_ "github.com/united-manufacturing-hub/benthos-umh/historian_plugin"
 	_ "github.com/united-manufacturing-hub/benthos-umh/modbus_plugin"
 	_ "github.com/united-manufacturing-hub/benthos-umh/nodered_js_plugin"
 	_ "github.com/united-manufacturing-hub/benthos-umh/opcua_plugin"
 	_ "github.com/united-manufacturing-hub/benthos-umh/s7comm_plugin"
 	_ "github.com/united-manufacturing-hub/benthos-umh/sensorconnect_plugin"
-	_ "github.com/united-manufacturing-hub/benthos-umh/snowflake_put_plugin"
 	_ "github.com/united-manufacturing-hub/benthos-umh/sparkplug_plugin"
-	_ "github.com/united-manufacturing-hub/benthos-umh/stream_processor_plugin"
 	_ "github.com/united-manufacturing-hub/benthos-umh/tag_processor_plugin"
-	_ "github.com/united-manufacturing-hub/benthos-umh/topic_browser_plugin"
-	_ "github.com/united-manufacturing-hub/benthos-umh/uns_plugin"
 )

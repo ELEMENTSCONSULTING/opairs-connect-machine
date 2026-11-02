@@ -17,8 +17,6 @@ go 1.27.1
 godebug x509negativeserial=1
 
 require (
-	github.com/RuneRoven/benthosAlarm v1.0.0
-	github.com/RuneRoven/benthosSMTP v0.0.1
 	github.com/RuneRoven/go-ads/v2 v2.3.4
 	github.com/bufbuild/protocompile v0.14.1
 	github.com/cespare/xxhash/v2 v2.3.0

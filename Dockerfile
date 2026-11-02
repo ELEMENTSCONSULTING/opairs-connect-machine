@@ -14,7 +14,8 @@
 #
 # Modified by ELEMENTS Consulting GmbH (2026): Go-Proxy auf proxy.golang.org
 # umgestellt (statt golangproxy.umh.app), ARG APP_VERSION ergaenzt, Image-Label
-# auf dieses Repository gesetzt.
+# auf dieses Repository gesetzt. Nur die Plugins kopiert, die
+# cmd/benthos/bundle einbindet.
 
 FROM golang:1.27.1@sha256:3680233e3204827fbdc66088528ae6d4b3d034f51d03a99d454f6de034888244 AS build
 
@@ -40,13 +41,7 @@ COPY ./nodered_js_plugin ./nodered_js_plugin
 COPY ./tag_processor_plugin ./tag_processor_plugin
 COPY ./sensorconnect_plugin ./sensorconnect_plugin
 COPY ./eip_plugin ./eip_plugin
-COPY ./uns_plugin ./uns_plugin
-COPY ./topic_browser_plugin ./topic_browser_plugin
-COPY ./classic_to_core_plugin ./classic_to_core_plugin
 COPY ./sparkplug_plugin ./sparkplug_plugin
-COPY ./stream_processor_plugin ./stream_processor_plugin
-COPY ./snowflake_put_plugin ./snowflake_put_plugin
-COPY ./historian_plugin ./historian_plugin
 
 ENV CGO_ENABLED=0
 RUN go build \

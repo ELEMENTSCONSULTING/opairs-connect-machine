@@ -10,7 +10,8 @@ an der Originalquelle verifiziert wurde.
 | Projektvorlage makenew/benthos-plugin | MIT | `NOTICE` | ja |
 | `sparkplug_plugin/sparkplugb/sparkplug_b_official.pb.go` (Cirrus Link / Eclipse Tahu) | **EPL-2.0** | Datei-Header | ja |
 | Redpanda Connect, Free-Bundle (`redpanda-data/connect/public/bundle/free`) | offen | `go.mod`, Upstream-Repo | **nein** |
-| `RuneRoven/benthosAlarm`, `RuneRoven/benthosSMTP` | offen | `go.mod` | **nein** |
+| `RuneRoven/benthosAlarm`, `RuneRoven/benthosSMTP` | nicht mehr eingebunden (seit 11/2026) | `cmd/benthos/bundle/package.go` | – |
+| `RuneRoven/go-ads` (Beckhoff-ADS-Plugin) | offen | `go.mod` | **nein** |
 | Uebrige Go-Abhaengigkeiten (siehe `go.mod`, `go.sum`) | offen | | **nein** |
 | PostgreSQL (Container-Image `postgres`) | PostgreSQL License | Docker Hub | nein |
 

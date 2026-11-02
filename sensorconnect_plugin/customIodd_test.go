@@ -53,7 +53,7 @@ var _ = Describe("FetchAndStoreCustomIODD", func() {
 			IoDeviceMap:      sync.Map{},
 			UseOnlyRawData:   false,
 			DeviceAddress:    "192.168.0.1",
-			IODDAPI:          "https://management.umh.app/iodd",
+			IODDAPI:          ioddAPI(), // Modified by ELEMENTS Consulting GmbH (2026): statt management.umh.app
 			CurrentCid:       0,
 			ConnectedDevices: []sensorconnect_plugin.ConnectedDeviceInfo{},
 		}
@@ -131,3 +131,12 @@ var _ = Describe("FetchAndStoreCustomIODD", func() {
 		})
 	})
 })
+
+// ioddAPI liefert die IODD-Quelle fuer Tests (Modified by ELEMENTS Consulting GmbH, 2026):
+// TEST_IODD_API, sonst der lokale Mirror.
+func ioddAPI() string {
+	if u := os.Getenv("TEST_IODD_API"); u != "" {
+		return u
+	}
+	return "http://localhost:8080"
+}
