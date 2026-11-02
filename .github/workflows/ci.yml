@@ -50,13 +50,13 @@ jobs:
 
       - name: Pipelines pruefen (benthos lint)
         run: |
-          for f in pipelines/*.yaml; do
+          for f in pipelines/*.yaml pipelines/vorlagen/*.yaml; do
             case "$f" in *_benthos_test.yaml) continue;; esac
             scripts/ci-run.sh "Lint $(basename "$f")" docker run --rm \
               -e POSTGRES_DSN=postgres://u:p@opairs-connect-db:5432/opairs \
               -e MACHINE_NAME=ci -e OPCUA_ENDPOINT=opc.tcp://localhost:4840 \
               -v "$PWD/pipelines:/p:ro" \
-              opairs-connect-machine:dev lint "/p/$(basename "$f")"
+              opairs-connect-machine:dev lint "/p/${f#pipelines/}"
           done
 
       - name: Pipeline-Unit-Tests (Mappings)

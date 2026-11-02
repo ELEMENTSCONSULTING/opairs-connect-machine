@@ -56,6 +56,11 @@ services:
       # (IO-Link-Sensoren liefern dann Rohdaten, neuer Versuch alle 10 s)
       iodd-mirror:
         condition: service_started
+    # Protokoll-Variablen der Pipelines (S7_ADDRESS, MODBUS_ADDRESS, ...), siehe
+    # connector.env.example. Datei ist optional und nicht eingecheckt.
+    env_file:
+      - path: ./connector.env
+        required: false
     environment:
       POSTGRES_DSN: postgres://opairs_writer:${OPAIRS_WRITER_PASSWORD}@opairs-connect-db:5432/${POSTGRES_DB:-opairs}?sslmode=disable
       MACHINE_NAME: ${MACHINE_NAME:-machine-01}

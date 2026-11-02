@@ -1,0 +1,54 @@
+# Sparkplug B (MQTT) -> Postgres
+# Status: Vorlage. Mit lint und Unit-Tests geprueft, noch nicht gegen einen echten Broker.
+#
+# Liest passiv (role secondary_passive): sendet nichts an den Broker, keine Rebirth-Befehle.
+# Braucht einen MQTT-Broker, an den die Geraete/Edge-Nodes Sparkplug B senden.
+#
+# machine = Device-ID, sonst Edge-Node-ID. tag = Metrikname (/ und : werden zu .).
+# Gespeichert werden nur Messwerte (BIRTH/DATA). STATE- und DEATH-Meldungen werden verworfen.
+#
+# Anpassen: connector.env: MQTT_URL, MQTT_USERNAME, MQTT_PASSWORD, SPARKPLUG_GROUP
+# Starten: in .env PIPELINE=/etc/opairs/pipelines/vorlagen/sparkplug-to-postgres.yaml
+
+input:
+  sparkplug_b:
+    mqtt:
+      urls: [ '${MQTT_URL:tcp://mqtt-broker:1883}' ]
+      client_id: 'opairs-connect-${MACHINE_NAME:sparkplug}'
+      credentials:
+        username: '${MQTT_USERNAME:}'
+        password: '${MQTT_PASSWORD:}'
+    identity:
+      group_id: '${SPARKPLUG_GROUP:Werk}'
+    role: 'secondary_passive'
+
+pipeline:
+  processors:
+    - mapping: |
+        let typ = meta("spb_message_type").or("")
+        if !["NBIRTH", "DBIRTH", "NDATA", "DDATA"].contains($typ) {
+          root = deleted()
+        } else {
+          let dev = meta("spb_device_id").or("")
+          let ms = meta("spb_timestamp").or("")
+          root.ts = if $ms == "" { now() } else { ($ms.number() / 1000).ts_format("2006-01-02T15:04:05.000Z07:00", "UTC") }
+          root.machine = if $dev != "" { $dev } else { meta("spb_edge_node_id").or("unknown") }
+          root.tag = meta("spb_metric_name").or("unknown").replace_all("/", ".").replace_all(":", ".")
+          root.quality = null
+
+          let v = this.value
+          let t = $v.type()
+          root.value = if $t == "number" { $v } else if $t == "bool" { if $v { 1 } else { 0 } } else { null }
+          root.value_text = if $t == "string" { $v } else if $t == "number" || $t == "bool" || $t == "null" { null } else { $v.string() }
+        }
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s

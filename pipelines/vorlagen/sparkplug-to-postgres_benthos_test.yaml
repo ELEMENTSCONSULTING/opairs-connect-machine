@@ -1,0 +1,28 @@
+# Unit-Tests fuer das Mapping der Sparkplug-B-Vorlage
+tests:
+  - name: Messwerte von Device und Edge-Node, STATE und DEATH verworfen
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '{"value": 22.5}'
+        metadata:
+          spb_message_type: DDATA
+          spb_edge_node_id: gateway-01
+          spb_device_id: ofen-01
+          spb_metric_name: Zone1/Temperature
+          spb_timestamp: '1793610000123'
+      - content: '{"value": true}'
+        metadata:
+          spb_message_type: NBIRTH
+          spb_edge_node_id: gateway-01
+          spb_metric_name: Online
+      - content: '{"value": null}'
+        metadata:
+          spb_message_type: DDEATH
+          spb_edge_node_id: gateway-01
+          spb_device_id: ofen-01
+      - content: '{}'
+        metadata:
+          spb_message_type: STATE
+    output_batches:
+      - - bloblang: 'this.machine == "ofen-01" && this.tag == "Zone1.Temperature" && this.value == 22.5 && this.ts == "2026-11-02T09:00:00.123Z"'
+        - bloblang: 'this.machine == "gateway-01" && this.tag == "Online" && this.value == 1'

@@ -1,0 +1,30 @@
+# Unit-Tests fuer das Mapping der Beckhoff-ADS-Vorlage
+tests:
+  - name: Zeitstempel der Steuerung, Tag-Name aus der Liste
+    environment:
+      MACHINE_NAME: verpacker-02
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '48.75'
+        metadata:
+          ads_symbol_name: GVL_fTemperature
+          ads_symbol_name_original: GVL.fTemperature
+          timestamp_ms: '1793610000123'
+      - content: 'true'
+        metadata:
+          ads_symbol_name: GVL_bRunning
+          ads_symbol_name_original: GVL.bRunning
+    output_batches:
+      - - bloblang: 'this.machine == "verpacker-02" && this.tag == "temperature_c" && this.value == 48.75 && this.ts == "2026-11-02T09:00:00.123Z"'
+        - bloblang: 'this.tag == "running" && this.value == 1 && this.ts.type() == "string"'
+
+  - name: Struktur als JSON-Text, TwinCAT-2-Symbol ohne fuehrenden Punkt
+    environment:
+      MACHINE_NAME: verpacker-02
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '{"FSPEED":291,"BENABLED":false}'
+        metadata:
+          ads_symbol_name_original: .stMotor1
+    output_batches:
+      - - bloblang: 'this.tag == "stmotor1" && this.value == null && this.value_text.parse_json().FSPEED == 291'

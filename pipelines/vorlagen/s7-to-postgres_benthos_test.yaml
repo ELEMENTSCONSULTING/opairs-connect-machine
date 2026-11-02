@@ -1,0 +1,31 @@
+# Unit-Tests fuer das Mapping der S7-Vorlage (ohne Steuerung, ohne Datenbank)
+tests:
+  - name: Bekannte Adressen bekommen ihren Tag-Namen
+    environment:
+      MACHINE_NAME: presse-01
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: 'true'
+        metadata:
+          s7_address: DB1.X0.0
+      - content: '72.5'
+        metadata:
+          s7_address: DB1.R4
+      - content: 'A-4711'
+        metadata:
+          s7_address: DB1.S12.20
+    output_batches:
+      - - bloblang: 'this.machine == "presse-01" && this.tag == "running" && this.value == 1 && this.value_text == null && this.quality == null'
+        - bloblang: 'this.tag == "temperature_c" && this.value == 72.5 && this.value_text == null'
+        - bloblang: 'this.tag == "article" && this.value == null && this.value_text == "A-4711"'
+
+  - name: Unbekannte Adresse behaelt die Adresse als Namen
+    environment:
+      MACHINE_NAME: presse-01
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '17'
+        metadata:
+          s7_address: DB2.W10
+    output_batches:
+      - - bloblang: 'this.tag == "db2_w10" && this.value == 17 && this.ts.type() == "string"'

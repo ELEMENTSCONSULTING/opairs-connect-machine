@@ -55,8 +55,11 @@ Knoten (`nodeIDs`) in der Datei anpassen und `docker compose up -d` ausfuehren.
 
 Wichtig: Wird nur der **Inhalt** einer Pipeline-Datei geaendert, bemerkt
 Compose das nicht. Dann `docker compose restart connector` ausfuehren.
-Weitere Protokolle: siehe `docs/input/` (S7, Modbus, EtherNet/IP, ifm IO-Link,
-Beckhoff ADS, Sparkplug B).
+Weitere Protokolle: Vorlagen in `pipelines/vorlagen/` (S7, Modbus TCP,
+EtherNet/IP, Beckhoff ADS, Sparkplug B, mehrere Anlagen in einem Connector),
+jeweils mit Unit-Tests. Ihre Variablen (Adressen, Zugangsdaten) kommen in
+`connector.env` (Vorlage `connector.env.example`, nicht eingecheckt). Die
+Plugin-Doku steht unter `docs/input/`.
 
 | Pipeline | Quelle |
 |---|---|
@@ -67,8 +70,8 @@ Beckhoff ADS, Sparkplug B).
 ## IO-Link: lokaler IODD-Mirror (offline)
 
 Das sensorconnect-Plugin braucht fuer jeden IO-Link-Sensor die
-Geraetebeschreibung (IODD) und laedt sie standardmaessig ueber einen
-UMH-Server aus dem Internet. Der Dienst **`iodd-mirror`** (`iodd_mirror/`)
+Geraetebeschreibung (IODD). Upstream laedt es sie ueber einen UMH-Server aus
+dem Internet; hier ist dieser Standard entfernt und `iodd_api` Pflicht. Der Dienst **`iodd-mirror`** (`iodd_mirror/`)
 bildet genau die zwei Abfragen nach, die das Plugin stellt, und liefert die
 IODDs aus dem Ordner `./iodd`. Der Connector braucht damit kein Internet, und
 die automatische Erkennung der Sensoren bleibt erhalten.

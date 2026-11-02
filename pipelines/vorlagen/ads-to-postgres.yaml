@@ -1,0 +1,67 @@
+# Beckhoff TwinCAT 2/3 (ADS) -> Postgres
+# Status: Vorlage. Mit lint und Unit-Tests geprueft, noch nicht gegen eine echte Steuerung.
+#
+# Voraussetzungen:
+#   - Route auf der Steuerung fuer den Connector-Host. Entweder von Hand in TwinCAT anlegen
+#     (empfohlen, aendert nichts automatisch) oder ADS_USERNAME/ADS_PASSWORD setzen: dann traegt
+#     das Plugin die Route selbst dauerhaft in die Routentabelle der Steuerung ein.
+#   - ADS_HOST_IP = die Adresse, unter der die Steuerung den Connector sieht (meist die IP des
+#     Docker-Hosts im Maschinennetz). Bei TwinCAT 2 im Docker-Bridge-Netz Pflicht.
+#   - Ports: 48898/TCP zur Steuerung, fuer die automatische Route zusaetzlich 48899/UDP
+#   - TwinCAT 3: Laufzeit-Port 851, TwinCAT 2: 801 (ADS_RUNTIME_PORT)
+#
+# Symbole: TwinCAT 3 "GVL.nCounter", "MAIN.fSpeed"; TwinCAT 2 globale Variablen mit Punkt ".nCounter".
+# Ganze Strukturen/Arrays brauchen loadSymbols: true (kurzer Jitter auf der Steuerung beim Laden).
+#
+# Anpassen: unifiedAddress, namen (im Mapping), connector.env: ADS_*; .env: MACHINE_NAME
+# Starten: in .env PIPELINE=/etc/opairs/pipelines/vorlagen/ads-to-postgres.yaml
+
+input:
+  ads:
+    targetAddress: '${ADS_ADDRESS:192.168.1.100}'
+    runtimePort: ${ADS_RUNTIME_PORT:851}
+    hostIP: '${ADS_HOST_IP:auto}'
+    username: '${ADS_USERNAME:}'
+    password: '${ADS_PASSWORD:}'
+    readType: 'notification'           # Steuerung meldet Aenderungen; alternativ interval
+    transmissionMode: 'serverOnChange'
+    cycleTime: '100ms'
+    maxDelay: '100ms'
+    unifiedAddress:
+      - 'GVL.bRunning'
+      - 'GVL.fTemperature'
+      - 'GVL.nPartCounter'
+
+pipeline:
+  processors:
+    - mapping: |
+        # Symbolname wie konfiguriert (ads_symbol_name ist fuer UMH-Topics umgeschrieben)
+        let sym = meta("ads_symbol_name_original").or(meta("ads_symbol_name").or(""))
+        let key = $sym.trim_prefix(".").replace_all(".", "_")
+        let namen = {
+          "GVL_bRunning": "running",
+          "GVL_fTemperature": "temperature_c",
+          "GVL_nPartCounter": "part_counter"
+        }
+        let ms = meta("timestamp_ms").or("")
+        root.ts = if $ms == "" { now() } else { ($ms.number() / 1000).ts_format("2006-01-02T15:04:05.000Z07:00", "UTC") }
+        root.machine = env("MACHINE_NAME").or("unknown")
+        root.tag = $namen.get($key).or($key.lowercase())
+        root.quality = null
+
+        # Strukturen kommen als JSON-Objekt und werden als Text gespeichert
+        let v = this.catch(content().string())
+        let t = $v.type()
+        root.value = if $t == "number" { $v } else if $t == "bool" { if $v { 1 } else { 0 } } else { null }
+        root.value_text = if $t == "string" { $v } else if $t == "number" || $t == "bool" || $t == "null" { null } else { $v.format_json(no_indent: true).string() }
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s

@@ -1,0 +1,51 @@
+# EtherNet/IP (Rockwell ControlLogix, CompactLogix, Micro820) -> Postgres
+# Status: Vorlage. Mit lint und Unit-Tests geprueft, noch nicht gegen eine echte Steuerung.
+#
+# Nur CIP ueber EtherNet/IP. PLC-5, SLC-500 und MicroLogix (PCCC) werden nicht unterstuetzt.
+# Tags werden nicht automatisch gefunden: Namen und Typen aus Studio 5000 bzw. CCW uebernehmen.
+# alias = Tag-Name in der Datenbank.
+#
+# Typen: bool, byte, int8, int16, int32, int64, uint16, uint32, uint64, float32, float64, string,
+#        Arrays als arrayofint16 usw. (dann length setzen)
+#
+# Anpassen: tags, connector.env: EIP_ADDRESS, EIP_POLL_MS; .env: MACHINE_NAME
+# Starten: in .env PIPELINE=/etc/opairs/pipelines/vorlagen/ethernetip-to-postgres.yaml
+
+input:
+  ethernetip:
+    endpoint: '${EIP_ADDRESS:192.168.0.20:44818}'
+    pollRate: ${EIP_POLL_MS:1000}
+    tags:
+      - name: 'Running'
+        type: 'bool'
+        alias: 'running'
+      - name: 'Program:MainProgram.Temperature'
+        type: 'float32'
+        alias: 'temperature_c'
+      - name: 'PartCounter'
+        type: 'int32'
+        alias: 'part_counter'
+
+pipeline:
+  processors:
+    - mapping: |
+        root.ts = now()
+        root.machine = env("MACHINE_NAME").or("unknown")
+        root.tag = meta("eip_tag_name").or("unknown")
+        root.quality = null
+
+        let v = this.catch(content().string())
+        let t = $v.type()
+        root.value = if $t == "number" { $v } else if $t == "bool" { if $v { 1 } else { 0 } } else { null }
+        root.value_text = if $t == "string" { $v } else if $t == "number" || $t == "bool" || $t == "null" { null } else { $v.string() }
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s
