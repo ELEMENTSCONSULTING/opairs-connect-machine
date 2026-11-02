@@ -31,7 +31,11 @@ pipeline:
         } else {
           let dev = meta("spb_device_id").or("")
           let ms = meta("spb_timestamp").or("")
-          root.ts = if $ms == "" { now() } else { ($ms.number() / 1000).ts_format("2006-01-02T15:04:05.000Z07:00", "UTC") }
+          # Millisekunden ganzzahlig umrechnen (als Kommazahl wuerde aus .123 s schnell .122 s)
+          let msn = if $ms == "" { 0 } else { $ms.number() }
+          let sec = ($msn / 1000).floor()
+          let frac = ($msn - $sec * 1000).round().int64()
+          root.ts = if $ms == "" { now() } else { $sec.ts_format("2006-01-02T15:04:05", "UTC") + "." + "%03d".format($frac) + "Z" }
           root.machine = if $dev != "" { $dev } else { meta("spb_edge_node_id").or("unknown") }
           root.tag = meta("spb_metric_name").or("unknown").replace_all("/", ".").replace_all(":", ".")
           root.quality = null

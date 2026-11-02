@@ -44,7 +44,11 @@ pipeline:
           "GVL_nPartCounter": "part_counter"
         }
         let ms = meta("timestamp_ms").or("")
-        root.ts = if $ms == "" { now() } else { ($ms.number() / 1000).ts_format("2006-01-02T15:04:05.000Z07:00", "UTC") }
+        # Millisekunden ganzzahlig umrechnen (als Kommazahl wuerde aus .123 s schnell .122 s)
+        let msn = if $ms == "" { 0 } else { $ms.number() }
+        let sec = ($msn / 1000).floor()
+        let frac = ($msn - $sec * 1000).round().int64()
+        root.ts = if $ms == "" { now() } else { $sec.ts_format("2006-01-02T15:04:05", "UTC") + "." + "%03d".format($frac) + "Z" }
         root.machine = env("MACHINE_NAME").or("unknown")
         root.tag = $namen.get($key).or($key.lowercase())
         root.quality = null
