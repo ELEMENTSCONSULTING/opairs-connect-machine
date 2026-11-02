@@ -33,7 +33,7 @@ jobs:
         run: scripts/ci-run.sh "Image-Build" docker compose build connector iodd-mirror
 
       - name: Image pruefen (keine UMH-Dienste, Plugin-Auswahl)
-        run: scripts/ci-run.sh "Image-Pruefung" ./scripts/check-image.sh
+        run: CI_NOTICE=1 scripts/ci-run.sh "Image-Pruefung" ./scripts/check-image.sh
 
       - name: IODD-Mirror Go-Tests (inkl. Kompatibilitaet mit sensorconnect-Plugin)
         run: |
