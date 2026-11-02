@@ -16,6 +16,28 @@ Maschinen --> connector (benthos-umh) --> Postgres --> Superset
                             (./iodd)
 ```
 
+## Enthaltene Plugins
+
+Der Stack laeuft eigenstaendig, ohne UMH Core, Kafka/Redpanda oder Dienste von
+UMH. Eingebunden sind (`cmd/benthos/bundle/package.go`):
+
+| Plugin | Art |
+|---|---|
+| `opcua` | Eingang OPC UA, Ausgang zum Schreiben |
+| `sensorconnect` | Eingang ifm IO-Link (IODDs vom lokalen `iodd-mirror`, `iodd_api` ist Pflicht) |
+| `s7comm`, `modbus`, `ethernetip`, `ads` (Beckhoff) | Eingaenge Steuerungen |
+| `sparkplug_b` | Ein- und Ausgang Sparkplug B (braucht einen MQTT-Broker) |
+| `downsampler`, `tag_processor`, `nodered_js` | Verarbeitung |
+| Redpanda-Free-Bundle | u. a. `generate`, `mapping`, `unarchive`, `sql_insert` |
+
+Bewusst nicht eingebunden: `uns`, `topic_browser`, `stream_processor`,
+`classic_to_core` (brauchen UMH Core bzw. Kafka/Redpanda), `historian`
+(TimescaleDB), `snowflake_put` (Cloud) sowie `benthosAlarm` und `benthosSMTP`
+(RuneRoven). Der Quellcode bleibt fuer Upstream-Updates im Repo, wird aber
+nicht gebaut. `scripts/check-image.sh` (laeuft in der CI) prueft, dass das
+Binary keine Adressen von UMH-Diensten enthaelt und genau diese Auswahl
+registriert.
+
 ## Schnellstart
 
 ```bash
@@ -263,8 +285,8 @@ steht unter EPL-2.0, nicht unter Apache-2.0.
 - Der Connector-Container hat keinen Healthcheck (`scratch`-Image ohne Shell).
   `restart: unless-stopped` startet ihn bei Absturz neu; der Status ist unter
   `:4195/ready` abrufbar.
-- Das Image enthaelt alle Upstream-Plugins und das Redpanda-Free-Bundle; eine
-  Reduktion auf die benoetigten Plugins ist offen.
+- Im Image sind nur die Plugins, die ohne UMH Core laufen (siehe
+  "Enthaltene Plugins"), dazu das Redpanda-Free-Bundle.
 - ERP-Anbindungen (SAP, Infor, proALPHA) sind nicht enthalten.
 - Die ifm-Pipeline ist mit Unit-Tests und `lint` geprueft, aber noch nicht
   gegen einen echten IO-Link-Master gelaufen. `iodd-mirror fetch` ist gegen

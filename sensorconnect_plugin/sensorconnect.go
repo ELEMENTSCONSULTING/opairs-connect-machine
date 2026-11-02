@@ -51,9 +51,11 @@ func ConfigSpec() *service.ConfigSpec {
 				Description("IP address or hostname of the IFM IO-Link master device"),
 		).
 		Field(
+			// Modified by ELEMENTS Consulting GmbH (2026): kein Standardwert mehr
+			// (vorher https://management.umh.app/iodd). Die IODD-Quelle muss
+			// angegeben werden, in OPAIRS Connect der lokale iodd-mirror.
 			service.NewStringField("iodd_api").
-				Description("URL of the IODD API").
-				Default("https://management.umh.app/iodd"),
+				Description("URL of the IODD API (required, e.g. the local iodd-mirror http://iodd-mirror:8080)"),
 		).
 		// New configuration for device-specific settings
 		Field(
@@ -138,8 +140,8 @@ func NewSensorConnectInput(conf *service.ParsedConfig, mgr *service.Resources) (
 func (s *SensorConnectInput) Connect(ctx context.Context) error {
 	s.logger.Infof("Connecting to device at %s", s.DeviceAddress)
 
-	if s.IODDAPI == "" { // fallback option for tests that create directly a SensorConnectInput without usign the benthos aprsing the default values there, in production this would never be executed
-		s.IODDAPI = "https://management.umh.app/iodd"
+	if s.IODDAPI == "" { // Modified by ELEMENTS Consulting GmbH (2026): kein Rueckgriff auf management.umh.app
+		return fmt.Errorf("'iodd_api' must be provided (e.g. http://iodd-mirror:8080)")
 	}
 
 	s.logger.Infof("IODD API: %v", s.IODDAPI)

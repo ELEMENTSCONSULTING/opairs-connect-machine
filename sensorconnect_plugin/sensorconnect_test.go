@@ -50,6 +50,7 @@ var _ = Describe("Sensorconnect", func() {
 
 			input := &sensorconnect_plugin.SensorConnectInput{
 				DeviceAddress: endpoint,
+				IODDAPI:       ioddAPI(), // Modified by ELEMENTS Consulting GmbH (2026)
 				CurrentCid:    -5,
 			}
 
@@ -63,6 +64,7 @@ var _ = Describe("Sensorconnect", func() {
 
 			input := &sensorconnect_plugin.SensorConnectInput{
 				DeviceAddress: endpoint,
+				IODDAPI:       ioddAPI(), // Modified by ELEMENTS Consulting GmbH (2026)
 				CurrentCid:    32764,
 			}
 
@@ -78,6 +80,7 @@ var _ = Describe("Sensorconnect", func() {
 
 			input := &sensorconnect_plugin.SensorConnectInput{
 				DeviceAddress: endpoint,
+				IODDAPI:       ioddAPI(), // Modified by ELEMENTS Consulting GmbH (2026)
 				CurrentCid:    0,
 			}
 
