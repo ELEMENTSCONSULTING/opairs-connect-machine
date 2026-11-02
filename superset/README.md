@@ -4,27 +4,48 @@
 "Dashboards -> Export") mit:
 
 - Datenbankverbindung **OPAIRS Connect** (`opairs_reader@opairs-connect-db:5432/opairs`)
-- 4 Datasets: `machine_data_1min`, `v_latest_1min` sowie die virtuellen
-  Datasets *OPAIRS Connect Anlagenstatus* und *OPAIRS Connect Textwerte*
-- 33 Charts in 5 Tabs: Uebersicht, CNC, Spritzguss, Montage, Datenqualitaet
-- Filter: Zeitraum (Standard: letzte 7 Tage), Anlagenart, Anlage
+- 3 virtuelle Datasets mit eigenen Namen, damit sie nicht mit selbst
+  angelegten Datasets auf dieselben Tabellen kollidieren:
+  - `opairs_connect_minutenwerte` (`SELECT * FROM opairs.machine_data_1min`)
+  - `opairs_connect_aktueller_stand` (`SELECT * FROM opairs.v_latest_1min`)
+  - `opairs_connect_rohdaten` (`SELECT * FROM opairs.machine_data`)
+- 28 Charts in 5 Tabs: Uebersicht, CNC, Spritzguss, Montage, Rohdaten
+- Filter: Zeitraum (Standard: letzte Woche), Anlage. Aktualisierung jede Minute.
 
-Getestet mit Apache Superset 6.0 und 6.1 gegen die Demo-Daten
-(`scripts/demo.sh backfill`).
+Getestet mit Apache Superset 6.1, lokal gegen die Demo-Daten und auf
+opairs-node-001 im Betrieb.
 
 ## Import
 
 Voraussetzung: Superset erreicht die Datenbank unter `opairs-connect-db`
 (siehe README, Abschnitt Superset, `compose.superset.yaml`).
 
+**Mit eigener Verbindung (ZIP aus dem Repo):**
+
 1. Superset -> **Dashboards** -> Import-Symbol (Pfeil) -> ZIP auswaehlen
 2. Superset fragt nach dem Passwort der Datenbank *OPAIRS Connect*: den Wert
    von `OPAIRS_READER_PASSWORD` aus `.env` eintragen
-3. Importieren, Dashboard **OPAIRS Connect** oeffnen
+3. Dashboard **OPAIRS Connect** oeffnen
 
-Gibt es schon eine selbst angelegte Verbindung mit dem Namen
-"OPAIRS Connect", diese vorher umbenennen oder loeschen. Superset lehnt den
-Import sonst wegen des doppelten Namens ab.
+Gibt es schon eine Verbindung mit dem Namen "OPAIRS Connect", die nicht aus
+diesem Export stammt, diese vorher umbenennen. Superset lehnt den Import sonst
+wegen des doppelten Namens ab.
+
+**Mit einer bereits angelegten Verbindung:** Superset ordnet Verbindungen beim
+Import ueber ihre UUID zu, nicht ueber den Namen. UUID und Name anzeigen
+(im Browser, angemeldet in Superset):
+
+```
+http://<superset>/api/v1/database/?q=(columns:!(database_name,uuid))
+```
+
+Dann die ZIP fuer diese Verbindung bauen und importieren. Es wird kein
+Passwort abgefragt, die Verbindung bleibt unveraendert:
+
+```bash
+python3 superset/build_dashboard.py \
+  --database-uuid <uuid> --database-name "<name>" --out /tmp/OPAIRS_Connect_Dashboard.zip
+```
 
 ## Update auf eine neue Fassung
 
@@ -32,11 +53,9 @@ Superset ueberschreibt beim Dashboard-Import nur das Dashboard selbst,
 **nicht** Charts und Datasets. Fuer ein Update deshalb vorher loeschen:
 
 1. Dashboards: *OPAIRS Connect* loeschen
-2. Charts: alle Charts des Dashboards loeschen (Liste nach Dashboard filtern,
-   "Bulk select")
-3. Datasets: die vier Datasets oben loeschen
-4. ZIP wie oben importieren. Die Datenbankverbindung bleibt bestehen, das
-   Passwort wird nicht erneut abgefragt.
+2. Charts: alle Charts mit `[OPAIRS Connect]` im Namen loeschen ("Bulk select")
+3. Datasets: die drei `opairs_connect_*`-Datasets loeschen
+4. ZIP wie oben importieren. Die Datenbankverbindung bleibt bestehen.
 
 ## Anpassen
 
@@ -46,10 +65,10 @@ Das Dashboard wird von `build_dashboard.py` erzeugt (nur Python-Standardbiblioth
 python3 superset/build_dashboard.py
 ```
 
-Charts, Filter und Layout stehen dort als Python-Aufrufe. Die UUIDs sind fest,
-ein Neuaufbau erzeugt dieselben Objekte. Die CI prueft mit `--check`, dass die
-eingecheckte ZIP zum Generator passt. Nach einer Aenderung also die ZIP neu bauen und
-mit einchecken.
+Charts, Filter und Layout stehen dort als Python-Aufrufe. Die UUIDs sind fest
+und haengen nicht von der Verbindung ab, ein Neuaufbau erzeugt dieselben
+Objekte. Die CI prueft mit `--check`, dass die eingecheckte ZIP zum Generator
+passt. Nach einer Aenderung also die ZIP neu bauen und mit einchecken.
 
 Aenderungen, die nur in Superset gemacht werden (Edit dashboard), bleiben
 erhalten, bis die ZIP erneut importiert wird.
@@ -58,18 +77,15 @@ erhalten, bis die ZIP erneut importiert wird.
 
 | Kennzahl | Berechnung |
 |---|---|
-| Mittelwert | `SUM(avg_value * sample_count) / SUM(sample_count)` (gewichtet mit der Anzahl guter Werte je Minute) |
-| Verfuegbarkeit | Anteil der Werte mit `state = 1` |
-| iO-Quote | Anteil `pruef_ergebnis = 1` (Montage) bzw. `teil_io = 1` (Spritzguss) |
-| Uncertain/Bad | `SUM(bad_count)`: Werte, deren Quelle keine gute Qualitaet gemeldet hat. Sie stehen in den Rohdaten und fehlen in Mittel, Min und Max |
-| online | letzter Wert juenger als 1 Minute |
+| Laufzeitanteil | `SUM(avg_value * sample_count) / SUM(sample_count)` fuer `tag = state` (Anteil der Zeit mit `state = 1`) |
+| iO-Quote | wie oben fuer `pruef_ergebnis` (Montage) bzw. `teil_io` (Spritzguss) |
+| Werte mit Qualitaetsproblem | `SUM(bad_count)`: Werte mit Qualitaet Uncertain oder Bad. Sie stehen in den Rohdaten und fehlen in Mittel, Min und Max |
+| Anlagen mit Daten | Anlagen mit mindestens einem Rohwert in den letzten 5 Minuten |
+| Verlaeufe | `AVG(avg_value)`, bei Grenzwert-Signalen `MAX(max_value)` bzw. `MIN(min_value)` |
 
-Die Anlagenart ergibt sich aus dem Namen `<prefix>-<art>-<nr>`: `cnc` -> CNC,
-`sgm` -> Spritzguss, `mon` -> Montage, sonst "Sonstige". Echte Anlagen
-entsprechend benennen (`MACHINE_NAME`), oder `ART_SQL` in
-`build_dashboard.py` anpassen.
-
-Die Charts filtern nach Signalnamen (`tag`), nicht nach Anlagen. Echte
-Anlagen mit denselben Signalnamen erscheinen deshalb automatisch.
+Der Bereich (CNC, Spritzguss, Montage) im Chart "Laufzeitanteil im Verlauf"
+ergibt sich aus dem Anlagennamen (`cnc`, `sgm`, `mon`). Die Charts filtern nach
+Signalnamen (`tag`), nicht nach Anlagen. Echte Anlagen mit denselben
+Signalnamen erscheinen deshalb automatisch.
 
 Alle Zeiten sind UTC.

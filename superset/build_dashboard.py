@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Baut den Superset-Export "OPAIRS Connect" (Datenbank, Datasets, Charts, Dashboard).
 
-    python3 superset/build_dashboard.py            -> superset/OPAIRS_Connect_Dashboard.zip
-    python3 superset/build_dashboard.py --uri ...  -> andere Datenbank-URI (z. B. Tests)
+    python3 superset/build_dashboard.py
+        -> superset/OPAIRS_Connect_Dashboard.zip mit eigener Verbindung "OPAIRS Connect"
+    python3 superset/build_dashboard.py --database-uuid <uuid> --database-name <name> --out <zip>
+        -> nutzt eine in Superset bereits angelegte Verbindung (kein Passwort beim Import)
+    python3 superset/build_dashboard.py --check
+        -> prueft, ob die eingecheckte ZIP zum Generator passt (CI)
 
-Nur Standardbibliothek. Die Dateien sind JSON und damit gueltiges YAML, so wie
-Superset sie beim Import erwartet. Alle UUIDs sind fest (uuid5): ein erneuter
-Import mit "Overwrite" aktualisiert dieselben Objekte, statt Kopien anzulegen.
+Nur Standardbibliothek. Die Dateien sind JSON und damit gueltiges YAML, wie
+Superset sie beim Import liest. Alle UUIDs sind fest (uuid5), unabhaengig von
+der Verbindung: ein erneuter Import trifft dieselben Objekte.
 
-Getestet mit dem Import in Apache Superset 6.0 und 6.1 (Felder, die nur 6.1
-kennt, sind bewusst weggelassen).
+Getestet mit dem Import in Apache Superset 6.1 (lokal und auf opairs-node-001).
 """
-
 import argparse
 import io
 import json
@@ -19,551 +21,416 @@ import pathlib
 import uuid
 import zipfile
 
-NS = uuid.UUID("8f6c2b1e-4c1a-4d55-9a57-0b5c0de0a1f5")
-VERSION = "1.0.0"
-DB_NAME = "OPAIRS Connect"
-DEFAULT_URI = "postgresql://opairs_reader:XXXXXXXXXX@opairs-connect-db:5432/opairs"
-TIME_RANGE = 'DATEADD(DATETIME("now"), -7, day) : now'
-OUT = pathlib.Path(__file__).with_name("OPAIRS_Connect_Dashboard.zip")
+NS = uuid.UUID("6f1c0c1e-8d0a-4b7e-9a51-0a1b2c3d4e5f")
 
 
 def uid(name):
     return str(uuid.uuid5(NS, name))
 
 
-# Anlagenart aus dem Namensschema <prefix>-<art>-<nr> (Demo: demo-cnc-01 ...)
-ART_SQL = (
-    "CASE split_part({col}, '-', 2) WHEN 'cnc' THEN 'CNC' "
-    "WHEN 'sgm' THEN 'Spritzguss' WHEN 'mon' THEN 'Montage' ELSE 'Sonstige' END"
-)
+ROOT = "opairs_connect_dashboard"
+DEFAULT_DB_NAME = "OPAIRS Connect"
+DEFAULT_DB_UUID = uid("database")
+DEFAULT_URI = "postgresql://opairs_reader:XXXXXXXXXX@opairs-connect-db:5432/opairs"
+OUT = pathlib.Path(__file__).with_name("OPAIRS_Connect_Dashboard.zip")
+TIME_DEFAULT = "Last week"
 
+# ---------------------------------------------------------------- Datasets
 
-# --------------------------------------------------------------------------
-# Datasets
-# --------------------------------------------------------------------------
-
-def col(name, typ, dttm=False, expression="", verbose=None, description=None):
+def col(name, typ, dttm=False, verbose=None):
     return {
-        "column_name": name, "verbose_name": verbose, "is_dttm": dttm,
-        "is_active": True, "type": typ, "advanced_data_type": None,
-        "groupby": True, "filterable": True, "expression": expression,
-        "description": description, "python_date_format": None,
-        "extra": {},
+        "column_name": name, "verbose_name": verbose, "is_dttm": dttm, "is_active": True,
+        "type": typ, "advanced_data_type": None, "groupby": True, "filterable": True,
+        "expression": "", "description": None, "python_date_format": None,
+        "datetime_format": None, "extra": {},
     }
 
 
-def metric(name, expression, verbose, d3format=None, description=None):
+TS = "TIMESTAMP WITH TIME ZONE"
+DATASETS = {
+    "agg": {
+        "table_name": "opairs_connect_minutenwerte", "sql": "SELECT * FROM opairs.machine_data_1min", "main_dttm_col": "bucket",
+        "columns": [col("bucket", TS, True, "Minute"), col("machine", "TEXT", verbose="Anlage"),
+                    col("tag", "TEXT", verbose="Tag"), col("avg_value", "DOUBLE PRECISION", verbose="Mittelwert"),
+                    col("min_value", "DOUBLE PRECISION", verbose="Minimum"), col("max_value", "DOUBLE PRECISION", verbose="Maximum"),
+                    col("sample_count", "BIGINT", verbose="Anzahl Werte"), col("bad_count", "BIGINT", verbose="Werte mit Qualitätsproblem")],
+    },
+    "latest": {
+        "table_name": "opairs_connect_aktueller_stand", "sql": "SELECT * FROM opairs.v_latest_1min", "main_dttm_col": "bucket",
+        "columns": [col("machine", "TEXT", verbose="Anlage"), col("tag", "TEXT", verbose="Tag"),
+                    col("bucket", TS, True, "Minute"), col("avg_value", "DOUBLE PRECISION", verbose="Mittelwert"),
+                    col("min_value", "DOUBLE PRECISION", verbose="Minimum"), col("max_value", "DOUBLE PRECISION", verbose="Maximum"),
+                    col("sample_count", "BIGINT", verbose="Anzahl Werte"), col("bad_count", "BIGINT", verbose="Werte mit Qualitätsproblem")],
+    },
+    "raw": {
+        "table_name": "opairs_connect_rohdaten", "sql": "SELECT * FROM opairs.machine_data", "main_dttm_col": "ts",
+        "columns": [col("ts", TS, True, "Zeitpunkt"), col("machine", "TEXT", verbose="Anlage"),
+                    col("tag", "TEXT", verbose="Tag"), col("value", "DOUBLE PRECISION", verbose="Wert"),
+                    col("value_text", "TEXT", verbose="Textwert"), col("quality", "TEXT", verbose="Qualität")],
+    },
+}
+for k, d in DATASETS.items():
+    d["uuid"] = uid("dataset-" + k)
+
+
+def dataset_yaml(d, db_uuid):
     return {
-        "metric_name": name, "verbose_name": verbose, "metric_type": None,
-        "expression": expression, "description": description,
-        "d3format": d3format, "currency": None,
-        "extra": {"warning_markdown": ""}, "warning_text": None,
+        "table_name": d["table_name"], "main_dttm_col": d["main_dttm_col"], "currency_code_column": None,
+        "description": "OPAIRS Connect Dashboard", "default_endpoint": None, "offset": 0, "cache_timeout": None,
+        "catalog": "opairs", "schema": "opairs", "sql": d["sql"], "params": None, "template_params": None,
+        "filter_select_enabled": True, "fetch_values_predicate": None, "extra": None,
+        "normalize_columns": False, "always_filter_main_dttm": False, "folders": None,
+        "uuid": d["uuid"],
+        "metrics": [{"metric_name": "count", "verbose_name": "COUNT(*)", "metric_type": "count",
+                     "expression": "COUNT(*)", "description": None, "d3format": None, "currency": None,
+                     "extra": {"warning_markdown": ""}, "warning_text": None}],
+        "columns": d["columns"], "version": "1.0.0", "database_uuid": db_uuid,
     }
 
+# ---------------------------------------------------------------- Bausteine
 
-COUNT = metric("count", "COUNT(*)", "Anzahl")
-GEWICHTET = "SUM(avg_value * sample_count) / NULLIF(SUM(sample_count), 0)"
-AGG_METRICS = [
-    COUNT,
-    metric("mittelwert", GEWICHTET, "Mittelwert",
-           description="Mittelwert, gewichtet mit der Anzahl guter Werte je Minute"),
-    metric("anteil", GEWICHTET, "Anteil", ".1%",
-           "Für 1/0-Signale (state, teil_io, pruef_ergebnis): Anteil der Werte = 1"),
-    metric("minimum", "MIN(min_value)", "Minimum"),
-    metric("maximum", "MAX(max_value)", "Maximum"),
-    metric("messwerte", "SUM(sample_count)", "Messwerte (gut)", ",d"),
-    metric("schlechte_werte", "SUM(bad_count)", "Werte Uncertain/Bad", ",d"),
-    metric("quote_schlecht",
-           "SUM(bad_count)::float / NULLIF(SUM(bad_count + sample_count), 0)",
-           "Anteil Uncertain/Bad", ".2%"),
+_n = 0
+
+
+def _opt(prefix):
+    global _n
+    _n += 1
+    return f"{prefix}_{_n:04d}"
+
+
+def m_sql(label, expr):
+    return {"aggregate": None, "column": None, "datasourceWarning": False, "expressionType": "SQL",
+            "hasCustomLabel": True, "label": label, "optionName": _opt("metric"), "sqlExpression": expr}
+
+
+def f_time(col, value=TIME_DEFAULT):
+    return {"clause": "WHERE", "comparator": value, "expressionType": "SIMPLE", "operator": "TEMPORAL_RANGE",
+            "subject": col, "filterOptionName": _opt("filter"), "isExtra": False, "isNew": False,
+            "datasourceWarning": False, "sqlExpression": None}
+
+
+def f_in(col, values):
+    return {"clause": "WHERE", "comparator": values, "expressionType": "SIMPLE", "operator": "IN",
+            "operatorId": "IN", "subject": col, "filterOptionName": _opt("filter"), "isExtra": False,
+            "isNew": False, "datasourceWarning": False, "sqlExpression": None}
+
+
+def f_sql(expr):
+    return {"clause": "WHERE", "comparator": None, "expressionType": "SQL", "operator": None, "subject": None,
+            "filterOptionName": _opt("filter"), "isExtra": False, "isNew": False,
+            "datasourceWarning": False, "sqlExpression": expr}
+
+
+def c_sql(label, expr):
+    return {"label": label, "sqlExpression": expr, "expressionType": "SQL"}
+
+
+WAVG = "SUM(avg_value * sample_count) / NULLIF(SUM(sample_count), 0)"
+BEREICH = c_sql("Bereich", "CASE WHEN machine LIKE '%cnc%' THEN 'CNC' WHEN machine LIKE '%sgm%' "
+                           "THEN 'Spritzguss' WHEN machine LIKE '%mon%' THEN 'Montage' ELSE machine END")
+
+CHARTS = []  # dicts: id, name, ds, viz, params, desc
+
+
+def chart(name, ds, viz, params, desc=None):
+    cid = len(CHARTS) + 1
+    p = {"viz_type": viz, "extra_form_data": {}, "dashboards": [], **params}
+    CHARTS.append({"id": cid, "name": name, "ds": ds, "viz": viz, "params": p, "desc": desc,
+                   "uuid": uid(f"chart-{name}")})
+    return cid
+
+
+def big(name, ds, metric, filters, subtitle, fmt="SMART_NUMBER"):
+    return chart(name, ds, "big_number_total", {
+        "metric": metric, "adhoc_filters": filters, "subtitle": subtitle, "header_font_size": 0.4,
+        "subtitle_font_size": 0.15, "show_metric_name": False, "y_axis_format": fmt,
+        "time_format": "smart_date", "force_timestamp_formatting": False, "conditional_formatting": []})
+
+
+def line(name, ds, metrics, filters, groupby=None, grain="PT15M", fmt="SMART_NUMBER", y_title="",
+         xcol="bucket", desc=None):
+    bounds = [0, 1] if fmt.endswith("%") else [None, None]
+    return chart(name, ds, "echarts_timeseries_line", {
+        "x_axis": xcol, "time_grain_sqla": grain, "x_axis_sort_asc": True, "x_axis_sort_series": "name",
+        "x_axis_sort_series_ascending": True, "metrics": metrics,
+        "groupby": groupby if groupby is not None else ["machine"], "adhoc_filters": filters,
+        "order_desc": True, "row_limit": 10000, "truncate_metric": True, "show_empty_columns": True,
+        "comparison_type": "values", "annotation_layers": [], "forecastPeriods": 10, "forecastInterval": 0.8,
+        "x_axis_title_margin": 15, "y_axis_title": y_title, "y_axis_title_margin": 30,
+        "y_axis_title_position": "Left", "sort_series_type": "sum", "color_scheme": "supersetColors",
+        "seriesType": "line", "only_total": True, "opacity": 0.2, "markerSize": 6, "show_legend": True,
+        "legendType": "scroll", "legendOrientation": "top", "x_axis_time_format": "smart_date",
+        "rich_tooltip": True, "showTooltipTotal": False, "tooltipTimeFormat": "smart_date",
+        "y_axis_format": fmt, "y_axis_bounds": bounds, "truncateYAxis": fmt.endswith("%"),
+        "truncateXAxis": True, "zoomable": True,
+        "markerEnabled": False}, desc)
+
+
+def bar(name, ds, x, metrics, filters, groupby=None, fmt="SMART_NUMBER", stack=None, desc=None, y_title=""):
+    return chart(name, ds, "echarts_timeseries_bar", {
+        "x_axis": x, "x_axis_sort_asc": True, "metrics": metrics, "groupby": groupby or [],
+        "adhoc_filters": filters, "order_desc": True, "row_limit": 10000, "truncate_metric": True,
+        "show_empty_columns": True, "comparison_type": "values", "annotation_layers": [],
+        "forecastPeriods": 10, "forecastInterval": 0.8, "orientation": "vertical",
+        "x_axis_title_margin": 15, "y_axis_title": y_title, "y_axis_title_margin": 30,
+        "y_axis_title_position": "Left", "sort_series_type": "sum", "color_scheme": "supersetColors",
+        "show_value": True, "only_total": True, "stack": stack, "show_legend": True, "legendType": "scroll",
+        "legendOrientation": "top", "x_axis_time_format": "smart_date", "xAxisLabelInterval": "auto",
+        "y_axis_format": fmt, "y_axis_bounds": [None, None], "truncateXAxis": True, "rich_tooltip": True,
+        "showTooltipTotal": True, "tooltipSortByMetric": True, "tooltipTimeFormat": "smart_date"}, desc)
+
+
+NUMFMT = {k: {"d3NumberFormat": ",.2f"} for k in ("avg_value", "min_value", "max_value", "value")}
+
+
+def table_raw(name, ds, columns, filters, order, limit=1000, temporal=None):
+    return chart(name, ds, "table", {"column_config": {k: v for k, v in NUMFMT.items() if k in columns},
+        "query_mode": "raw", "groupby": [], "all_columns": columns, "percent_metrics": [],
+        "temporal_columns_lookup": temporal or {}, "adhoc_filters": filters,
+        "order_by_cols": [json.dumps(o) for o in order], "server_pagination": False, "row_limit": limit,
+        "order_desc": True, "table_timestamp_format": "%d.%m.%Y %H:%M:%S", "show_cell_bars": False,
+        "color_pn": True, "allow_render_html": False, "include_search": True, "conditional_formatting": []})
+
+
+def table_agg(name, ds, groupby, metrics, filters, limit=1000, sort_metric=None):
+    return chart(name, ds, "table", {
+        "query_mode": "aggregate", "groupby": groupby, "metrics": metrics, "all_columns": [],
+        "percent_metrics": [], "adhoc_filters": filters, "order_by_cols": [], "server_pagination": False,
+        "row_limit": limit, "order_desc": True, "timeseries_limit_metric": sort_metric,
+        "table_timestamp_format": "%d.%m.%Y %H:%M", "show_cell_bars": True, "color_pn": True,
+        "allow_render_html": False, "include_search": True, "conditional_formatting": []})
+
+# ---------------------------------------------------------------- Charts
+
+T = f_time
+EXCL_TIME = []  # Charts ohne Zeitfilter des Dashboards
+
+# Uebersicht
+c_anlagen = big("[OPAIRS Connect] Anlagen mit Daten", "raw",
+                m_sql("Anlagen mit Daten", "COUNT(DISTINCT machine)"),
+                [f_sql("ts > now() - interval '5 minutes'")], "liefern in den letzten 5 Minuten")
+EXCL_TIME.append(c_anlagen)
+c_lauf = big("[OPAIRS Connect] Laufzeitanteil", "agg", m_sql("Laufzeitanteil", WAVG),
+             [T("bucket"), f_in("tag", ["state"])], "alle Anlagen im Zeitraum", ".1%")
+c_io_mon = big("[OPAIRS Connect] iO-Quote Montage", "agg", m_sql("iO-Quote Montage", WAVG),
+               [T("bucket"), f_in("tag", ["pruef_ergebnis"])], "Montagelinien im Zeitraum", ".1%")
+c_io_sgm = big("[OPAIRS Connect] iO-Quote Spritzguss", "agg", m_sql("iO-Quote Spritzguss", WAVG),
+               [T("bucket"), f_in("tag", ["teil_io"])], "Spritzgussmaschinen im Zeitraum", ".1%")
+c_bad = big("[OPAIRS Connect] Werte mit Qualitätsproblem", "agg",
+            m_sql("Werte mit Qualitätsproblem", "SUM(bad_count)"), [T("bucket")],
+            "Uncertain/Bad im Zeitraum")
+c_lauf_anl = bar("[OPAIRS Connect] Laufzeitanteil je Anlage", "agg", "machine",
+                 [m_sql("Laufzeitanteil", WAVG)], [T("bucket"), f_in("tag", ["state"])], fmt=".0%")
+c_lauf_verl = line("[OPAIRS Connect] Laufzeitanteil im Verlauf", "agg", [m_sql("Laufzeitanteil", WAVG)],
+                   [T("bucket"), f_in("tag", ["state"])], groupby=[BEREICH], grain="PT1H", fmt=".0%")
+c_stand = table_raw("[OPAIRS Connect] Aktueller Stand", "latest",
+                    ["machine", "tag", "avg_value", "min_value", "max_value", "bad_count", "bucket"],
+                    [], [["machine", True], ["tag", True]], temporal={"bucket": True})
+EXCL_TIME.append(c_stand)
+
+# CNC
+c_cnc = [
+    line("[OPAIRS Connect] CNC Spindeldrehzahl", "agg", [m_sql("Drehzahl (1/min)", "AVG(avg_value)")],
+         [T("bucket"), f_in("tag", ["spindle_speed_rpm"])], y_title="1/min"),
+    line("[OPAIRS Connect] CNC Temperatur", "agg", [m_sql("Temperatur (°C)", "AVG(avg_value)")],
+         [T("bucket"), f_in("tag", ["temperature_c"])], y_title="°C"),
+    line("[OPAIRS Connect] CNC Leistung", "agg", [m_sql("Leistung (kW)", "AVG(avg_value)")],
+         [T("bucket"), f_in("tag", ["power_kw"])], y_title="kW"),
+    line("[OPAIRS Connect] CNC Vibration (Maximum)", "agg", [m_sql("Vibration max (mm/s)", "MAX(max_value)")],
+         [T("bucket"), f_in("tag", ["vibration_mm_s"])], y_title="mm/s"),
+]
+c_cnc_bad = bar("[OPAIRS Connect] Qualitätsprobleme je Anlage", "agg", "machine",
+                [m_sql("Werte mit Qualitätsproblem", "SUM(bad_count)")], [T("bucket")])
+
+# Spritzguss
+c_sgm = [
+    line("[OPAIRS Connect] Spritzguss Werkzeugtemperatur", "agg", [m_sql("Werkzeugtemperatur (°C)", "AVG(avg_value)")],
+         [T("bucket"), f_in("tag", ["werkzeugtemperatur_c"])], y_title="°C"),
+    line("[OPAIRS Connect] Spritzguss Massetemperatur", "agg", [m_sql("Massetemperatur (°C)", "AVG(avg_value)")],
+         [T("bucket"), f_in("tag", ["massetemperatur_c"])], y_title="°C"),
+    line("[OPAIRS Connect] Spritzguss Zykluszeit", "agg", [m_sql("Zykluszeit (s)", "AVG(avg_value)")],
+         [T("bucket"), f_in("tag", ["zykluszeit_s"])], y_title="s"),
+    line("[OPAIRS Connect] Spritzguss Einspritzdruck", "agg", [m_sql("Einspritzdruck (bar)", "AVG(avg_value)")],
+         [T("bucket"), f_in("tag", ["einspritzdruck_bar"])], y_title="bar"),
+]
+c_sgm_io = line("[OPAIRS Connect] Spritzguss iO-Quote", "agg", [m_sql("iO-Quote", WAVG)],
+                [T("bucket"), f_in("tag", ["teil_io"])], grain="PT1H", fmt=".0%")
+c_sgm_wz = table_agg("[OPAIRS Connect] Spritzguss Werkzeug je Tag", "raw",
+                     [c_sql("Tag", "to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD')"), "machine",
+                      c_sql("Werkzeug", "value_text")],
+                     [m_sql("Erste Meldung (UTC)", "to_char(MIN(ts) AT TIME ZONE 'UTC', 'HH24:MI')"),
+                      m_sql("Letzte Meldung (UTC)", "to_char(MAX(ts) AT TIME ZONE 'UTC', 'HH24:MI')")],
+                     [T("ts"), f_in("tag", ["werkzeug"])],
+                     sort_metric=m_sql("Sortierung", "MAX(ts)"))
+c_sgm_nio = bar("[OPAIRS Connect] Spritzguss NiO-Gründe", "raw", c_sql("NiO-Grund", "value_text"),
+                [m_sql("Anzahl", "COUNT(*)")],
+                [T("ts"), f_in("tag", ["nio_grund"]), f_sql("machine LIKE '%sgm%'")],
+                groupby=["machine"], stack="Stack")
+
+# Montage
+c_mon = [
+    line("[OPAIRS Connect] Schraubstation Drehmoment", "agg",
+         [m_sql("Drehmoment Mittel (Nm)", "AVG(avg_value)"), m_sql("Drehmoment max (Nm)", "MAX(max_value)")],
+         [T("bucket"), f_in("tag", ["schraub_drehmoment_nm"])], groupby=[], y_title="Nm",
+         desc="Steigt über die Schicht (Bit-Verschleiß)"),
+    line("[OPAIRS Connect] Dichtheitsprüfung Leckrate (Maximum)", "agg",
+         [m_sql("Leckrate max (ccm/min)", "MAX(max_value)")],
+         [T("bucket"), f_in("tag", ["leckrate_ccm_min"])], groupby=[], y_title="ccm/min",
+         desc="NiO ab 2,0 ccm/min"),
+    line("[OPAIRS Connect] Einpressstation Kraft", "agg",
+         [m_sql("Kraft min (kN)", "MIN(min_value)"), m_sql("Kraft Mittel (kN)", "AVG(avg_value)"),
+          m_sql("Kraft max (kN)", "MAX(max_value)")],
+         [T("bucket"), f_in("tag", ["einpresskraft_kn"])], groupby=[], y_title="kN",
+         desc="iO 7,2 bis 8,8 kN"),
+    line("[OPAIRS Connect] Endprüfung Isolationswiderstand (Minimum)", "agg",
+         [m_sql("Isolationswiderstand min (MOhm)", "MIN(min_value)")],
+         [T("bucket"), f_in("tag", ["isolationswiderstand_mohm"])], groupby=[], y_title="MOhm",
+         desc="NiO unter 100 MOhm"),
+]
+c_mon_io = line("[OPAIRS Connect] Montage iO-Quote je Linie", "agg", [m_sql("iO-Quote", WAVG)],
+                [T("bucket"), f_in("tag", ["pruef_ergebnis"])], grain="PT1H", fmt=".0%")
+c_mon_takt = line("[OPAIRS Connect] Montage Taktzeit", "agg", [m_sql("Taktzeit (s)", "AVG(avg_value)")],
+                  [T("bucket"), f_in("tag", ["taktzeit_s"])], grain="PT1H", y_title="s")
+c_mon_nio = bar("[OPAIRS Connect] Montage NiO-Gründe", "raw", c_sql("NiO-Grund", "value_text"),
+                [m_sql("Anzahl", "COUNT(*)")],
+                [T("ts"), f_in("tag", ["nio_grund"]), f_sql("machine LIKE '%mon%'")],
+                groupby=["machine"], stack="Stack")
+
+# Rohdaten
+c_raw = table_raw("[OPAIRS Connect] Rohdaten letzte 15 Minuten", "raw",
+                  ["ts", "machine", "tag", "value", "value_text", "quality"],
+                  [f_sql("ts > now() - interval '15 minutes'")], [["ts", False]], limit=10000,
+                  temporal={"ts": True})
+EXCL_TIME.append(c_raw)
+
+# ---------------------------------------------------------------- Layout
+
+POS = {"DASHBOARD_VERSION_KEY": "v2",
+       "ROOT_ID": {"children": ["GRID_ID"], "id": "ROOT_ID", "type": "ROOT"},
+       "HEADER_ID": {"id": "HEADER_ID", "meta": {"text": "OPAIRS Connect"}, "type": "HEADER"}}
+GRID = {"children": [], "id": "GRID_ID", "parents": ["ROOT_ID"], "type": "GRID"}
+POS["GRID_ID"] = GRID
+TABS_ID = "TABS-opairs"
+TABS = {"children": [], "id": TABS_ID, "meta": {}, "parents": ["ROOT_ID", "GRID_ID"], "type": "TABS"}
+POS[TABS_ID] = TABS
+GRID["children"].append(TABS_ID)
+_row = 0
+BY_ID = {c["id"]: c for c in CHARTS}
+TAB_OF = {}
+
+
+def tab(key, title):
+    tid = f"TAB-{key}"
+    POS[tid] = {"children": [], "id": tid, "meta": {"defaultText": "Tab title", "placeholder": "Tab title",
+                                                     "text": title}, "parents": ["ROOT_ID", "GRID_ID", TABS_ID],
+                "type": "TAB"}
+    TABS["children"].append(tid)
+    return tid
+
+
+def row(tid, items, height=50):
+    """items: Liste (chart_id oder ('md', text), breite)."""
+    global _row
+    _row += 1
+    rid = f"ROW-{_row:03d}"
+    parents = ["ROOT_ID", "GRID_ID", TABS_ID, tid]
+    POS[rid] = {"children": [], "id": rid, "meta": {"background": "BACKGROUND_TRANSPARENT"},
+                "parents": parents, "type": "ROW"}
+    POS[tid]["children"].append(rid)
+    assert sum(w for _, w in items) <= 12, items
+    for i, (item, width) in enumerate(items):
+        if isinstance(item, tuple):
+            mid = f"MARKDOWN-{_row:03d}-{i}"
+            POS[mid] = {"children": [], "id": mid, "meta": {"code": item[1], "height": height, "width": width},
+                        "parents": parents + [rid], "type": "MARKDOWN"}
+            POS[rid]["children"].append(mid)
+            continue
+        c = BY_ID[item]
+        key = f"CHART-{item:03d}"
+        POS[key] = {"children": [], "id": key, "meta": {"chartId": item, "height": height,
+                                                          "sliceName": c["name"], "uuid": c["uuid"],
+                                                          "sliceNameOverride": c["name"].replace("[OPAIRS Connect] ", ""),
+                                                          "width": width},
+                    "parents": parents + [rid], "type": "CHART"}
+        POS[rid]["children"].append(key)
+        TAB_OF[item] = tid
+
+
+LEGENDE = """### Hinweise
+
+- **Laufzeitanteil:** Anteil der Zeit mit `state = 1` (Anlage produziert).
+- **iO-Quote:** Anteil guter Teile aus `pruef_ergebnis` (Montage) bzw. `teil_io` (Spritzguss).
+- **Qualitätsproblem:** Werte mit Qualität *Uncertain* oder *Bad*. Sie zählen nicht in Mittelwerte.
+- Zeiten in **UTC**. Minutenwerte entstehen alle 5 Minuten, Rohdaten alle 10 s.
+- Quelle: Schema `opairs` der OPAIRS-Connect-Datenbank."""
+
+t1 = tab("uebersicht", "Übersicht")
+row(t1, [(c_anlagen, 3), (c_lauf, 3), (c_io_mon, 2), (c_io_sgm, 2), (c_bad, 2)], height=25)
+row(t1, [(c_lauf_anl, 6), (c_lauf_verl, 6)])
+row(t1, [(c_stand, 8), (("md", LEGENDE), 4)], height=70)
+t2 = tab("cnc", "CNC")
+row(t2, [(c_cnc[0], 6), (c_cnc[1], 6)])
+row(t2, [(c_cnc[2], 6), (c_cnc[3], 6)])
+row(t2, [(c_cnc_bad, 12)])
+t3 = tab("spritzguss", "Spritzguss")
+row(t3, [(c_sgm[0], 6), (c_sgm[1], 6)])
+row(t3, [(c_sgm[2], 6), (c_sgm[3], 6)])
+row(t3, [(c_sgm_io, 6), (c_sgm_nio, 6)])
+row(t3, [(c_sgm_wz, 12)])
+t4 = tab("montage", "Montage")
+row(t4, [(c_mon[0], 6), (c_mon[1], 6)])
+row(t4, [(c_mon[2], 6), (c_mon[3], 6)])
+row(t4, [(c_mon_io, 4), (c_mon_takt, 4), (c_mon_nio, 4)])
+t5 = tab("rohdaten", "Rohdaten")
+row(t5, [(c_raw, 12)], height=100)
+
+assert set(TAB_OF) == set(BY_ID), "nicht alle Charts im Layout"
+
+# ---------------------------------------------------------------- Filter
+
+ALL = sorted(BY_ID)
+TIME_SCOPE = [c for c in ALL if c not in EXCL_TIME]
+TABS_ALL = TABS["children"]
+FILTERS = [
+    {"id": "NATIVE_FILTER-opairs-zeitraum", "type": "NATIVE_FILTER", "name": "Zeitraum",
+     "filterType": "filter_time", "description": "", "targets": [{}],
+     "controlValues": {"enableEmptyFilter": False},
+     "defaultDataMask": {"extraFormData": {"time_range": TIME_DEFAULT},
+                         "filterState": {"value": TIME_DEFAULT}, "ownState": {}},
+     "cascadeParentIds": [], "scope": {"rootPath": ["ROOT_ID"], "excluded": EXCL_TIME},
+     "chartsInScope": TIME_SCOPE, "tabsInScope": TABS_ALL},
+    {"id": "NATIVE_FILTER-opairs-anlage", "type": "NATIVE_FILTER", "name": "Anlage",
+     "filterType": "filter_select", "description": "",
+     "targets": [{"column": {"name": "machine"}, "datasetUuid": DATASETS["agg"]["uuid"]}],
+     "controlValues": {"enableEmptyFilter": False, "defaultToFirstItem": False, "creatable": False,
+                       "multiSelect": True, "searchAllOptions": False, "inverseSelection": False},
+     "defaultDataMask": {"extraFormData": {}, "filterState": {}, "ownState": {}},
+     "cascadeParentIds": [], "sortMetric": None, "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+     "chartsInScope": ALL, "tabsInScope": TABS_ALL},
 ]
 
-AGG_COLUMNS = [
-    col("bucket", "TIMESTAMP WITH TIME ZONE", dttm=True, verbose="Minute (UTC)"),
-    col("machine", "TEXT", verbose="Anlage"),
-    col("tag", "TEXT", verbose="Signal"),
-    col("avg_value", "DOUBLE PRECISION", verbose="Mittel"),
-    col("min_value", "DOUBLE PRECISION", verbose="Min"),
-    col("max_value", "DOUBLE PRECISION", verbose="Max"),
-    col("sample_count", "BIGINT", verbose="Werte (gut)"),
-    col("bad_count", "BIGINT", verbose="Uncertain/Bad"),
-    col("anlagenart", "TEXT", expression=ART_SQL.format(col="machine"),
-        verbose="Anlagenart"),
-]
+LABEL_COLORS = {"CNC": "#1F77B4", "Spritzguss": "#FF7F0E", "Montage": "#2CA02C"}
 
-STATUS_SQL = """WITH anlagen AS (
-    SELECT machine, max(bucket) + interval '1 minute' AS letzter_wert
-      FROM opairs.machine_data_1min
-     WHERE bucket > now() - interval '30 days'
-     GROUP BY machine
-), frisch AS (
-    SELECT machine, max(ts) AS letzter_wert,
-           count(*) FILTER (WHERE ts > now() - interval '10 minutes') AS werte_10min
-      FROM opairs.machine_data
-     WHERE ts > now() - interval '1 hour'
-     GROUP BY machine
-), zustand AS (
-    SELECT DISTINCT ON (machine, tag) machine, tag, value, value_text
-      FROM opairs.machine_data
-     WHERE tag IN ('status', 'state') AND ts > now() - interval '1 hour'
-     ORDER BY machine, tag, ts DESC
-)
-, basis AS (
-    SELECT machine,
-           COALESCE(f.letzter_wert, a.letzter_wert) AS letzter_wert,
-           COALESCE(f.werte_10min, 0) AS werte_10min
-      FROM anlagen a
-      FULL JOIN frisch f USING (machine)
-)
-SELECT b.machine,
-       """ + ART_SQL.format(col="b.machine") + """ AS anlagenart,
-       CASE WHEN b.letzter_wert > now() - interval '1 minute'
-            THEN 'online' ELSE 'offline' END AS verbindung,
-       COALESCE(st.value_text,
-                CASE s.value WHEN 1 THEN 'Produktion' WHEN 0 THEN 'Stillstand' END,
-                '-') AS status,
-       b.letzter_wert,
-       EXTRACT(EPOCH FROM now() - b.letzter_wert)::bigint AS alter_s,
-       b.werte_10min
-  FROM basis b
-  LEFT JOIN zustand st ON st.machine = b.machine AND st.tag = 'status'
-  LEFT JOIN zustand s  ON s.machine = b.machine AND s.tag = 'state'"""
+dashboard = {
+    "dashboard_title": "OPAIRS Connect", "description": None, "css": "", "slug": "opairs-connect",
+    "certified_by": "", "certification_details": "", "published": True,
+    "uuid": uid("dashboard"), "position": POS,
+    "metadata": {
+        "chart_configuration": {}, "global_chart_configuration": {
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []}, "chartsInScope": ALL},
+        "color_scheme": "", "refresh_frequency": 60, "expanded_slices": {}, "label_colors": LABEL_COLORS,
+        "timed_refresh_immune_slices": [], "cross_filters_enabled": True, "default_filters": "{}",
+        "chart_customization_config": [], "filter_bar_orientation": "HORIZONTAL",
+        "show_chart_timestamps": False, "color_scheme_domain": [], "shared_label_colors": [],
+        "map_label_colors": {}, "native_filter_configuration": FILTERS},
+    "theme_uuid": None, "version": "1.0.0",
+}
 
-EREIGNIS_SQL = """SELECT ts, machine,
-       """ + ART_SQL.format(col="machine") + """ AS anlagenart,
-       tag, value_text
-  FROM opairs.machine_data
- WHERE value_text IS NOT NULL"""
+# ---------------------------------------------------------------- Schreiben
 
 
-def dataset(key, table, dttm, columns, metrics, sql="", description=None):
-    return key, {
-        "table_name": table, "main_dttm_col": dttm,
-        "description": description,
-        "default_endpoint": None, "offset": 0, "cache_timeout": None,
-        "catalog": "opairs", "schema": "opairs", "sql": sql, "params": None,
-        "template_params": None, "filter_select_enabled": True,
-        "fetch_values_predicate": None, "extra": None,
-        "normalize_columns": False, "always_filter_main_dttm": False,
-        "folders": None, "uuid": uid("dataset:" + key), "metrics": metrics,
-        "columns": columns, "version": VERSION, "database_uuid": uid("database"),
-    }
-
-
-DATASETS = dict([
-    dataset("minuten", "machine_data_1min", "bucket", AGG_COLUMNS, AGG_METRICS,
-            description="Minutenwerte je Anlage und Signal (nur Werte guter Qualität)"),
-    dataset("aktuell", "v_latest_1min", "bucket",
-            [c for c in AGG_COLUMNS], AGG_METRICS,
-            description="Letzter Minutenwert je Anlage und Signal (24 h)"),
-    dataset("status", "OPAIRS Connect Anlagenstatus", None, [
-        col("machine", "TEXT", verbose="Anlage"),
-        col("anlagenart", "TEXT", verbose="Anlagenart"),
-        col("verbindung", "TEXT", verbose="Verbindung"),
-        col("status", "TEXT", verbose="Status"),
-        col("letzter_wert", "TIMESTAMP WITH TIME ZONE", verbose="Letzter Wert (UTC)"),
-        col("alter_s", "BIGINT", verbose="Alter (s)"),
-        col("werte_10min", "BIGINT", verbose="Werte 10 min"),
-    ], [COUNT, metric("online", "SUM(CASE WHEN verbindung = 'online' THEN 1 ELSE 0 END)",
-                      "Anlagen online", ",d")],
-        sql=STATUS_SQL, description="Verbindung und Status je Anlage, live"),
-    dataset("ereignisse", "OPAIRS Connect Textwerte", "ts", [
-        col("ts", "TIMESTAMP WITH TIME ZONE", dttm=True, verbose="Zeit (UTC)"),
-        col("machine", "TEXT", verbose="Anlage"),
-        col("anlagenart", "TEXT", verbose="Anlagenart"),
-        col("tag", "TEXT", verbose="Signal"),
-        col("value_text", "TEXT", verbose="Wert"),
-    ], [COUNT], sql=EREIGNIS_SQL,
-        description="Textwerte aus den Rohdaten (Status, Werkzeug, NiO-Grund)"),
-])
-DS_OF = {}  # Chart -> Dataset-Schluessel
-
-
-# --------------------------------------------------------------------------
-# Charts
-# --------------------------------------------------------------------------
-
-_fid = 0
-
-
-def flt(subject, value, op="=="):
-    global _fid
-    _fid += 1
-    ops = {"==": "EQUALS", "IN": "IN", "LIKE": "LIKE"}
-    return {
-        "expressionType": "SIMPLE", "subject": subject, "operator": op,
-        "operatorId": ops[op], "comparator": value, "clause": "WHERE",
-        "sqlExpression": None, "isExtra": False, "isNew": False,
-        "datasourceWarning": False, "filterOptionName": f"filter_opairs_{_fid}",
-    }
-
-
-def time_flt(column, default="No filter"):
-    f = flt(column, default)
-    f["operator"] = "TEMPORAL_RANGE"
-    f.pop("operatorId")
-    return f
-
-
-def sql_metric(label, expression):
-    return {
-        "expressionType": "SQL", "sqlExpression": expression, "label": label,
-        "hasCustomLabel": True, "optionName": "metric_" + uid(label)[:12],
-        "aggregate": None, "column": None, "datasourceWarning": False,
-    }
-
-
-def sql_column(label, expression):
-    return {"expressionType": "SQL", "sqlExpression": expression, "label": label}
-
-
-CHARTS = {}  # key -> config
-TIMECOL = {"minuten": "bucket", "aktuell": "bucket", "ereignisse": "ts"}
-
-
-def chart(key, title, ds, viz, params, description=None):
-    base = {"datasource": "1__table", "viz_type": viz, "extra_form_data": {}}
-    base.update(params)
-    filters = list(base.get("adhoc_filters", []))
-    if ds in TIMECOL and not any(f.get("operator") == "TEMPORAL_RANGE" for f in filters):
-        filters.insert(0, time_flt(TIMECOL[ds], "Last week" if ds == "ereignisse" else "No filter"))
-    base["adhoc_filters"] = filters
-    CHARTS[key] = {
-        "slice_name": title, "description": description, "certified_by": None,
-        "certification_details": None, "viz_type": viz, "params": base,
-        "query_context": None, "cache_timeout": None,
-        "uuid": uid("chart:" + key), "version": VERSION,
-        "dataset_uuid": DATASETS[ds]["uuid"],
-    }
-    DS_OF[key] = ds
-
-
-def kpi(key, title, ds, m, subtitle, fmt, filters=()):
-    chart(key, title, ds, "big_number_total", {
-        "metric": m, "adhoc_filters": list(filters), "header_font_size": 0.4,
-        "subtitle": subtitle, "subtitle_font_size": 0.15, "show_metric_name": False,
-        "y_axis_format": fmt, "time_format": "smart_date",
-        "force_timestamp_formatting": False, "conditional_formatting": [],
-    })
-
-
-def ts_common(fmt):
-    return {
-        "x_axis_sort_asc": True, "order_desc": True, "row_limit": 10000,
-        "truncate_metric": True, "show_empty_columns": True,
-        "comparison_type": "values", "annotation_layers": [],
-        "forecastPeriods": 10, "forecastInterval": 0.8,
-        "x_axis_title_margin": 15, "y_axis_title_margin": 30,
-        "y_axis_title_position": "Left", "sort_series_type": "sum",
-        "color_scheme": "supersetColors", "only_total": True,
-        "show_legend": True, "legendType": "scroll", "legendOrientation": "top",
-        "x_axis_time_format": "smart_date", "xAxisLabelInterval": "auto",
-        "rich_tooltip": True, "showTooltipTotal": False,
-        "tooltipTimeFormat": "smart_date", "y_axis_format": fmt,
-        "y_axis_bounds": [None, None], "truncateXAxis": True,
-    }
-
-
-def line(key, title, tag, metrics=("mittelwert",), groupby=("machine",), grain="PT15M",
-         fmt="SMART_NUMBER", y_title="", ds="minuten", extra_filters=(), description=None):
-    p = ts_common(fmt)
-    p.update({
-        "x_axis": TIMECOL[ds], "time_grain_sqla": grain, "metrics": list(metrics),
-        "groupby": list(groupby),
-        "adhoc_filters": [flt("tag", tag)] + list(extra_filters),
-        # Luecken (Stillstand, Wochenende) als Luecke zeigen statt zu ueberbruecken
-        "resample_rule": {"PT15M": "15min", "PT1H": "1h"}[grain], "resample_method": "asfreq",
-        "seriesType": "line", "opacity": 0.2, "markerEnabled": False,
-        "y_axis_bounds": [0, 1] if fmt.endswith("%") else [None, None],
-        "markerSize": 6, "zoomable": True, "y_axis_title": y_title,
-    })
-    chart(key, title, ds, "echarts_timeseries_line", p, description)
-
-
-def bar(key, title, ds, x, metrics, filters=(), groupby=(), grain=None, fmt="SMART_NUMBER",
-        stack=False, horizontal=False, show_value=False, description=None):
-    p = ts_common(fmt)
-    p.update({
-        "x_axis": x, "metrics": list(metrics), "groupby": list(groupby),
-        "adhoc_filters": list(filters), "orientation": "horizontal" if horizontal else "vertical",
-        "show_value": show_value, "stack": "Stack" if stack else None,
-    })
-    if x not in TIMECOL.values():
-        p["xAxisLabelInterval"] = "0"  # jede Anlage beschriften
-    if grain:
-        p["time_grain_sqla"] = grain
-    chart(key, title, ds, "echarts_timeseries_bar", p, description)
-
-
-def table_raw(key, title, ds, columns, order, filters=(), page=20):
-    chart(key, title, ds, "table", {
-        "query_mode": "raw", "groupby": [], "metrics": [], "all_columns": columns,
-        "percent_metrics": [], "adhoc_filters": list(filters),
-        "order_by_cols": [json.dumps([c, asc]) for c, asc in order],
-        "row_limit": 1000, "server_page_length": page, "order_desc": True,
-        "table_timestamp_format": "%Y-%m-%d %H:%M:%S", "allow_render_html": False,
-        "show_cell_bars": False, "color_pn": True, "include_search": False,
-        "column_config": {c: {"d3NumberFormat": ",.2f"} for c in columns
-                          if c in ("avg_value", "min_value", "max_value")},
-    })
-
-
-def table_agg(key, title, ds, groupby, metrics, filters=(), sort=None, page=20,
-              percent=(), cell_bars=True):
-    chart(key, title, ds, "table", {
-        "query_mode": "aggregate", "groupby": list(groupby), "metrics": list(metrics),
-        "all_columns": [], "percent_metrics": list(percent),
-        "adhoc_filters": list(filters), "timeseries_limit_metric": sort,
-        "order_desc": True, "row_limit": 1000, "server_page_length": page,
-        "table_timestamp_format": "%Y-%m-%d %H:%M:%S", "allow_render_html": False,
-        "show_cell_bars": cell_bars, "color_pn": True, "include_search": False,
-    })
-
-
-def pie(key, title, ds, groupby, m, filters=()):
-    chart(key, title, ds, "pie", {
-        "groupby": [groupby], "metric": m, "adhoc_filters": list(filters),
-        "row_limit": 100, "sort_by_metric": True, "color_scheme": "supersetColors",
-        "show_labels_threshold": 5, "show_legend": True, "legendType": "scroll",
-        "legendOrientation": "top", "label_type": "key_percent",
-        "number_format": "SMART_NUMBER", "date_format": "smart_date",
-        "show_labels": True, "labels_outside": True, "outerRadius": 70,
-        "donut": True, "innerRadius": 35,
-    })
-
-
-# --- Uebersicht -------------------------------------------------------------
-kpi("k_online", "Anlagen online", "status", "online", "Daten in der letzten Minute", ",d")
-kpi("k_verf", "Verfügbarkeit", "minuten", "anteil", "Anteil state = 1", ".1%",
-    [flt("tag", "state")])
-kpi("k_io_mon", "iO-Quote Montage", "minuten", "anteil", "pruef_ergebnis", ".1%",
-    [flt("tag", "pruef_ergebnis")])
-kpi("k_io_sgm", "iO-Quote Spritzguss", "minuten", "anteil", "teil_io", ".1%",
-    [flt("tag", "teil_io")])
-kpi("k_werte", "Messwerte", "minuten", "messwerte", "gespeichert, gute Qualität", "SMART_NUMBER")
-kpi("k_bad", "Uncertain/Bad", "minuten", "schlechte_werte", "Werte schlechter Qualität",
-    "SMART_NUMBER")
-table_raw("t_status", "Anlagenstatus (live)", "status",
-          ["machine", "anlagenart", "verbindung", "status", "letzter_wert", "alter_s",
-           "werte_10min"], [("anlagenart", True), ("machine", True)])
-bar("b_verf", "Verfügbarkeit je Anlage", "minuten", "machine", ["anteil"],
-    [flt("tag", "state")], fmt=".0%", show_value=True, horizontal=True)
-line("l_verf", "Verfügbarkeit je Anlagenart (stündlich)", "state", ["anteil"],
-     ["anlagenart"], "PT1H", ".0%")
-line("l_io", "iO-Quote je Linie (stündlich)", "pruef_ergebnis", ["anteil"], ["machine"],
-     "PT1H", ".0%")
-
-# --- CNC ---------------------------------------------------------------------
-line("c_spindel", "Spindeldrehzahl", "spindle_speed_rpm", y_title="1/min")
-line("c_temp", "Temperatur", "temperature_c", y_title="°C")
-line("c_power", "Leistung", "power_kw", y_title="kW")
-line("c_vib", "Vibration, Maximum je 15 min (nur gute Werte)", "vibration_mm_s", ["maximum"],
-     y_title="mm/s")
-bar("c_bad", "Vibration: Werte Uncertain/Bad je Stunde", "minuten", "bucket",
-    ["schlechte_werte"], [flt("tag", "vibration_mm_s")], ["machine"], "PT1H", stack=True)
-
-# --- Spritzguss -----------------------------------------------------------------
-line("s_wzt", "Werkzeugtemperatur", "werkzeugtemperatur_c", y_title="°C")
-line("s_mt", "Massetemperatur", "massetemperatur_c", y_title="°C")
-line("s_druck", "Einspritzdruck", "einspritzdruck_bar", y_title="bar")
-line("s_zyklus", "Zykluszeit", "zykluszeit_s", y_title="s")
-line("s_io", "iO-Quote je Maschine (stündlich)", "teil_io", ["anteil"], ["machine"],
-     "PT1H", ".0%")
-table_agg("s_wz", "Werkzeugeinsatz je Tag", "ereignisse",
-          [sql_column("Tag", "to_char(ts, 'YYYY-MM-DD')"), "machine",
-           sql_column("Werkzeug", "value_text")],
-          [sql_metric("von", "to_char(MIN(ts), 'HH24:MI')"),
-           sql_metric("bis", "to_char(MAX(ts), 'HH24:MI')")],
-          [flt("tag", "werkzeug")], cell_bars=False, page=14)
-pie("s_nio", "NiO-Gründe Spritzguss", "ereignisse", "value_text", "count",
-    [flt("tag", "nio_grund"), flt("anlagenart", "Spritzguss")])
-
-# --- Montage ---------------------------------------------------------------------
-line("m_dm", "Schraubdrehmoment (Mittel, Min, Max)", "schraub_drehmoment_nm",
-     ["mittelwert", "minimum", "maximum"], (), y_title="Nm",
-     description="Steigt über die Schicht (Bit-Verschleiß in den Demo-Daten)")
-line("m_dw", "Schraubdrehwinkel", "schraub_drehwinkel_grad", y_title="°")
-line("m_leck", "Leckrate, Maximum (NiO > 2,0)", "leckrate_ccm_min", ["maximum"], (),
-     y_title="ccm/min")
-line("m_kraft", "Einpresskraft (iO 7,2-8,8)", "einpresskraft_kn",
-     ["mittelwert", "minimum", "maximum"], (), y_title="kN")
-line("m_iso", "Isolationswiderstand, Minimum (NiO < 100)", "isolationswiderstand_mohm",
-     ["minimum"], (), y_title="MOhm")
-line("m_takt", "Taktzeit je Linie", "taktzeit_s", y_title="s")
-bar("m_io", "iO-Quote je Linie", "minuten", "machine", ["anteil"],
-    [flt("tag", "pruef_ergebnis")], fmt=".1%", show_value=True)
-bar("m_nio", "NiO-Gründe je Linie", "ereignisse", "value_text", ["count"],
-    [flt("tag", "nio_grund"), flt("anlagenart", "Montage")], ["machine"], stack=True,
-    horizontal=True)
-
-# --- Datenqualitaet --------------------------------------------------------------
-bar("q_werte", "Gespeicherte Messwerte je Stunde", "minuten", "bucket", ["messwerte"],
-    groupby=["machine"], grain="PT1H", stack=True)
-table_agg("q_signale", "Signale mit Werten Uncertain/Bad", "minuten", ["machine", "tag"],
-          ["schlechte_werte", "messwerte", "quote_schlecht"],
-          [{
-              "expressionType": "SQL", "sqlExpression": "SUM(bad_count) > 0", "clause": "HAVING",
-              "subject": None, "operator": None, "comparator": None, "isExtra": False,
-              "isNew": False, "datasourceWarning": False,
-              "filterOptionName": "filter_opairs_bad"}],
-          sort="schlechte_werte")
-table_raw("q_aktuell", "Aktuelle Minutenwerte je Signal", "aktuell",
-          ["machine", "tag", "avg_value", "sample_count", "bad_count", "bucket"],
-          [("machine", True), ("tag", True)], page=25)
-
-
-# --------------------------------------------------------------------------
-# Dashboard
-# --------------------------------------------------------------------------
-
-MD_UEBERSICHT = """### OPAIRS Connect
-
-Maschinendaten aus dem Connector-Stack (`opairs-connect-machine`), gespeichert in
-PostgreSQL. Alle Zeiten **UTC**.
-
-- **Verfügbarkeit**: Anteil der Messwerte mit `state = 1`
-- **iO-Quote**: Anteil iO bei `pruef_ergebnis` (Montage) bzw. `teil_io` (Spritzguss)
-- **Uncertain/Bad**: Werte, deren Quelle keine gute Qualität gemeldet hat. Sie zählen nicht in Mittelwerte
-- **online**: letzter Wert jünger als 1 Minute
-
-Die Anlagenart ergibt sich aus dem Namen: `…-cnc-…` CNC, `…-sgm-…` Spritzguss, `…-mon-…` Montage, sonst „Sonstige“."""
-
-MD_QUALITAET = """### Datenqualität
-
-- **Messwerte je Stunde**: Lücken zeigen Ausfälle von Connector oder Quelle
-- **Uncertain/Bad**: Qualitätsstatus der Quelle (z. B. OPC UA). Diese Werte stehen in den Rohdaten
-  (`opairs.machine_data`, Spalte `quality`), fließen aber nicht in die Minutenwerte ein
-- Minutenwerte werden alle 5 Minuten berechnet, die letzten Minuten können fehlen"""
-
-TABS = [
-    ("uebersicht", "Übersicht", [
-        [("k_online", 2, 26), ("k_verf", 2, 26), ("k_io_mon", 2, 26), ("k_io_sgm", 2, 26),
-         ("k_werte", 2, 26), ("k_bad", 2, 26)],
-        [("t_status", 7, 60), ("b_verf", 5, 60)],
-        [("l_verf", 6, 50), ("l_io", 6, 50)],
-        [("md:uebersicht", 12, 30)],
-    ]),
-    ("cnc", "CNC", [
-        [("c_spindel", 6, 50), ("c_temp", 6, 50)],
-        [("c_power", 6, 50), ("c_vib", 6, 50)],
-        [("c_bad", 12, 40)],
-    ]),
-    ("sgm", "Spritzguss", [
-        [("s_wzt", 6, 50), ("s_mt", 6, 50)],
-        [("s_druck", 6, 50), ("s_zyklus", 6, 50)],
-        [("s_io", 6, 50), ("s_nio", 6, 50)],
-        [("s_wz", 12, 62)],
-    ]),
-    ("mon", "Montage", [
-        [("m_io", 4, 50), ("m_dm", 8, 50)],
-        [("m_dw", 6, 50), ("m_leck", 6, 50)],
-        [("m_kraft", 6, 50), ("m_iso", 6, 50)],
-        [("m_takt", 6, 50), ("m_nio", 6, 50)],
-    ]),
-    ("qualitaet", "Datenqualität", [
-        [("q_werte", 8, 50), ("md:qualitaet", 4, 50)],
-        [("q_signale", 5, 70), ("q_aktuell", 7, 70)],
-    ]),
-]
-MARKDOWN = {"uebersicht": MD_UEBERSICHT, "qualitaet": MD_QUALITAET}
-
-
-def build_dashboard():
-    chart_ids = {key: i + 1 for i, key in enumerate(CHARTS)}
-    pos = {
-        "DASHBOARD_VERSION_KEY": "v2",
-        "ROOT_ID": {"children": ["GRID_ID"], "id": "ROOT_ID", "type": "ROOT"},
-        "GRID_ID": {"children": ["TABS-opairs"], "id": "GRID_ID",
-                    "parents": ["ROOT_ID"], "type": "GRID"},
-        "HEADER_ID": {"id": "HEADER_ID", "meta": {"text": "OPAIRS Connect"}, "type": "HEADER"},
-        "TABS-opairs": {"children": [], "id": "TABS-opairs", "meta": {},
-                        "parents": ["ROOT_ID", "GRID_ID"], "type": "TABS"},
-    }
-    for tab_key, tab_title, rows in TABS:
-        tab_id = f"TAB-{tab_key}"
-        tab_parents = ["ROOT_ID", "GRID_ID", "TABS-opairs"]
-        pos["TABS-opairs"]["children"].append(tab_id)
-        pos[tab_id] = {"children": [], "id": tab_id, "parents": tab_parents, "type": "TAB",
-                       "meta": {"defaultText": "Tab title", "placeholder": "Tab title",
-                                "text": tab_title}}
-        for r, row in enumerate(rows):
-            row_id = f"ROW-{tab_key}-{r}"
-            row_parents = tab_parents + [tab_id]
-            pos[tab_id]["children"].append(row_id)
-            pos[row_id] = {"children": [], "id": row_id, "parents": row_parents, "type": "ROW",
-                           "meta": {"background": "BACKGROUND_TRANSPARENT"}}
-            for key, width, height in row:
-                parents = row_parents + [row_id]
-                if key.startswith("md:"):
-                    cid = f"MARKDOWN-{key[3:]}"
-                    pos[cid] = {"children": [], "id": cid, "parents": parents,
-                                "type": "MARKDOWN",
-                                "meta": {"code": MARKDOWN[key[3:]], "height": height,
-                                         "width": width}}
-                else:
-                    cid = f"CHART-{key}"
-                    c = CHARTS[key]
-                    pos[cid] = {"children": [], "id": cid, "parents": parents, "type": "CHART",
-                                "meta": {"chartId": chart_ids[key], "height": height,
-                                         "sliceName": c["slice_name"], "uuid": c["uuid"],
-                                         "width": width}}
-                pos[row_id]["children"].append(cid)
-
-    placed = {k for _, _, rows in TABS for row in rows for k, _, _ in row}
-    missing = set(CHARTS) - placed
-    assert not missing, f"Charts ohne Platz im Dashboard: {missing}"
-
-    no_time = [chart_ids[k] for k in CHARTS if DS_OF[k] == "status"]
-    minuten = DATASETS["minuten"]["uuid"]
-
-    def select_filter(fid, name, column, parents=()):
-        return {
-            "id": fid, "type": "NATIVE_FILTER", "name": name, "filterType": "filter_select",
-            "description": "", "targets": [{"column": {"name": column}, "datasetUuid": minuten}],
-            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
-            "controlValues": {"enableEmptyFilter": False, "defaultToFirstItem": False,
-                              "creatable": False, "multiSelect": True,
-                              "searchAllOptions": False, "inverseSelection": False},
-            "defaultDataMask": {"extraFormData": {}, "filterState": {}, "ownState": {}},
-            "cascadeParentIds": list(parents), "sortMetric": None,
-        }
-
-    native = [
-        {
-            "id": "NATIVE_FILTER-opairs-zeitraum", "type": "NATIVE_FILTER", "name": "Zeitraum",
-            "filterType": "filter_time", "description": "", "targets": [{}],
-            "scope": {"rootPath": ["ROOT_ID"], "excluded": no_time},
-            "controlValues": {"enableEmptyFilter": False},
-            "defaultDataMask": {"extraFormData": {"time_range": TIME_RANGE},
-                                "filterState": {"value": TIME_RANGE}, "ownState": {}},
-            "cascadeParentIds": [],
-        },
-        select_filter("NATIVE_FILTER-opairs-anlagenart", "Anlagenart", "anlagenart"),
-        select_filter("NATIVE_FILTER-opairs-anlage", "Anlage", "machine",
-                      ["NATIVE_FILTER-opairs-anlagenart"]),
-    ]
-    green, red, yellow, grey = "#2ECC71", "#E74C3C", "#F1C40F", "#95A5A6"
-    return {
-        "dashboard_title": "OPAIRS Connect",
-        "description": "Maschinendaten aus opairs-connect-machine (Demo und echte Anlagen)",
-        "css": "", "slug": "opairs-connect", "certified_by": "", "certification_details": "",
-        "published": True, "uuid": uid("dashboard"), "position": pos,
-        "metadata": {
-            "chart_configuration": {},
-            "global_chart_configuration": {"scope": {"rootPath": ["ROOT_ID"], "excluded": []},
-                                           "chartsInScope": []},
-            "color_scheme": "", "refresh_frequency": 300, "expanded_slices": {},
-            "label_colors": {"online": green, "offline": red, "Produktion": green,
-                             "Stoerung": red, "Pause": yellow, "Ruesten": yellow,
-                             "Stillstand": grey},
-            "timed_refresh_immune_slices": [], "cross_filters_enabled": True,
-            "native_filter_configuration": native, "default_filters": "{}",
-            "chart_customization_config": [], "filter_bar_orientation": "HORIZONTAL",
-            "show_chart_timestamps": False, "color_scheme_domain": [],
-            "shared_label_colors": [], "map_label_colors": {},
-        },
-        "theme_uuid": None, "version": VERSION,
-    }
+def safe(name):
+    return "".join(ch if ch.isalnum() else "_" for ch in name).strip("_")
 
 
 def members(data):
@@ -571,32 +438,36 @@ def members(data):
         return {n: z.read(n) for n in z.namelist()}
 
 
-def build(uri, out, check=False):
-    root = "dashboard_export_opairs_connect"
+def build(db_uuid, db_name, uri, out, check=False):
     database = {
-        "database_name": DB_NAME, "sqlalchemy_uri": uri, "cache_timeout": None,
-        "expose_in_sqllab": True, "allow_run_async": False, "allow_ctas": False,
+        "database_name": db_name, "sqlalchemy_uri": uri,
+        "cache_timeout": None, "expose_in_sqllab": True, "allow_run_async": False, "allow_ctas": False,
         "allow_cvas": False, "allow_dml": False, "allow_file_upload": False,
         "extra": {"metadata_params": {}, "engine_params": {}, "metadata_cache_timeout": {},
                   "schemas_allowed_for_file_upload": []},
-        "impersonate_user": False,
-        "uuid": uid("database"), "version": VERSION,
+        "impersonate_user": False, "configuration_method": "sqlalchemy_form", "uuid": db_uuid,
+        "version": "1.0.0",
     }
     files = {
-        # fester Zeitstempel: gleicher Generator ergibt byte-gleiche ZIP (CI-Pruefung)
-        "metadata.yaml": {"version": VERSION, "type": "Dashboard",
-                          "timestamp": "2026-11-01T00:00:00+00:00"},
-        "databases/OPAIRS_Connect.yaml": database,
-        "dashboards/OPAIRS_Connect.yaml": build_dashboard(),
+        # fester Zeitstempel: gleicher Generator ergibt dieselbe ZIP (CI-Pruefung)
+        "metadata.yaml": {"version": "1.0.0", "type": "Dashboard", "timestamp": "2026-11-01T00:00:00+00:00"},
+        f"databases/{safe(db_name)}.yaml": database,
+        "dashboards/OPAIRS_Connect.yaml": dashboard,
     }
-    for key, ds in DATASETS.items():
-        files[f"datasets/OPAIRS_Connect/{key}.yaml"] = ds
-    for key, c in CHARTS.items():
-        files[f"charts/{key}.yaml"] = c
+    for d in DATASETS.values():
+        files[f"datasets/{safe(db_name)}/{d['table_name']}.yaml"] = dataset_yaml(d, db_uuid)
+    for c in CHARTS:
+        p = dict(c["params"])
+        p["slice_id"] = c["id"]
+        files[f"charts/{safe(c['name'])}_{c['id']}.yaml"] = {
+            "slice_name": c["name"], "description": c["desc"], "certified_by": None,
+            "certification_details": None, "viz_type": c["viz"], "params": p, "query_context": None,
+            "cache_timeout": None, "uuid": c["uuid"], "version": "1.0.0",
+            "dataset_uuid": DATASETS[c["ds"]]["uuid"]}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name, content in sorted(files.items()):
-            info = zipfile.ZipInfo(f"{root}/{name}", date_time=(2026, 11, 1, 0, 0, 0))
+            info = zipfile.ZipInfo(f"{ROOT}/{name}", date_time=(2026, 11, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             z.writestr(info, json.dumps(content, ensure_ascii=False, indent=1) + "\n")
     if check:
@@ -608,14 +479,18 @@ def build(uri, out, check=False):
         print(f"{out}: aktuell")
         return
     pathlib.Path(out).write_bytes(buf.getvalue())
-    print(f"{out}: {len(CHARTS)} Charts, {len(DATASETS)} Datasets")
+    print(f"{out}: {len(CHARTS)} Charts, {len(DATASETS)} Datasets, Verbindung {db_name!r} ({db_uuid})")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--uri", default=DEFAULT_URI, help="SQLAlchemy-URI der Datenbank")
+    ap.add_argument("--database-uuid", default=DEFAULT_DB_UUID,
+                    help="UUID einer bestehenden Superset-Verbindung (Standard: eigene Verbindung)")
+    ap.add_argument("--database-name", default=DEFAULT_DB_NAME,
+                    help="Name der Verbindung (bei bestehender Verbindung deren Name)")
+    ap.add_argument("--uri", default=DEFAULT_URI, help="SQLAlchemy-URI, nur fuer eine neue Verbindung")
     ap.add_argument("--out", default=str(OUT))
     ap.add_argument("--check", action="store_true",
                     help="nur pruefen, ob die vorhandene ZIP zum Generator passt")
     a = ap.parse_args()
-    build(a.uri, a.out, a.check)
+    build(a.database_uuid, a.database_name, a.uri, a.out, a.check)
