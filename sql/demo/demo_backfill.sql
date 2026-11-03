@@ -55,16 +55,17 @@ SELECT ts,
 ------------------------------------------------------------------------
 WITH m(machine, seed, rpm, down_pct) AS (
     VALUES ('demo-cnc-01', 1, 8000, 8), ('demo-cnc-02', 2, 6500, 15), ('demo-cnc-03', 3, 9500, 4)
-), s AS (
+), s AS MATERIALIZED (
+    -- MATERIALIZED: random() je Zeile genau einmal (Wert und Qualitaet passen zusammen)
     SELECT t.*, m.machine, m.rpm,
            t.weekday AND t.hm BETWEEN 300 AND 1259
-             AND (t.block * 7919 + m.seed * 104729) % 100 >= m.down_pct AS running
+             AND (t.block * 7919 + m.seed * 104729) % 100 >= m.down_pct AS running,
+           random() < 0.02 AS spike
       FROM _demo_t t CROSS JOIN m
 )
 INSERT INTO opairs.machine_data (ts, machine, tag, value, value_text, quality)
 SELECT s.ts, s.machine, v.tag, v.value, NULL, v.quality
   FROM s
- CROSS JOIN LATERAL (SELECT random() < 0.02 AS spike) x
  CROSS JOIN LATERAL (VALUES
     ('state',             CASE WHEN s.running THEN 1 ELSE 0 END::double precision, 'Good'),
     ('spindle_speed_rpm', CASE WHEN s.running THEN round((s.rpm * (0.95 + 0.1 * random()))::numeric, 0)::double precision ELSE 0 END, 'Good'),
@@ -73,9 +74,9 @@ SELECT s.ts, s.machine, v.tag, v.value, NULL, v.quality
     ('power_kw',          round((CASE WHEN s.running THEN 7.5 * s.rpm / 8000.0 + 3 * random()
                                       ELSE 0.6 + 0.3 * random() END)::numeric, 2)::double precision, 'Good'),
     ('vibration_mm_s',    round((CASE WHEN NOT s.running THEN 0.2 * random()
-                                      WHEN x.spike THEN 6 + 3 * random()
+                                      WHEN s.spike THEN 6 + 3 * random()
                                       ELSE 1.5 + random() END)::numeric, 2)::double precision,
-                          CASE WHEN s.running AND x.spike THEN 'Uncertain 0x40900000' ELSE 'Good' END)
+                          CASE WHEN s.running AND s.spike THEN 'Uncertain 0x40900000' ELSE 'Good' END)
  ) v(tag, value, quality);
 
 ------------------------------------------------------------------------
