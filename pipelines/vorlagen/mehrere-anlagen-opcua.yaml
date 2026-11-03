@@ -1,0 +1,69 @@
+# Mehrere Anlagen in einem Connector (Beispiel: zwei OPC-UA-Server) -> Postgres
+# Status: Vorlage. Mit lint und Unit-Tests geprueft, noch nicht gegen echte Server.
+#
+# Jede Quelle ist ein Eintrag unter broker.inputs und setzt ueber eine mutation den
+# Anlagennamen (meta machine). Das Mapping ist dasselbe wie in opcua-to-postgres.yaml.
+# Faellt eine Quelle aus, laufen die anderen weiter; die ausgefallene verbindet sich neu.
+# Gleiches Muster fuer andere Protokolle (s7comm, modbus, ...) und gemischte Quellen:
+# dann pro Quelle ein eigenes Mapping in deren processors (siehe Anleitung, Kapitel 8).
+#
+# Anpassen: Quellen, Anlagennamen, connector.env: OPCUA_ENDPOINT_1, OPCUA_ENDPOINT_2
+# Starten: in .env PIPELINE=/etc/opairs/pipelines/vorlagen/mehrere-anlagen-opcua.yaml
+
+input:
+  broker:
+    inputs:
+      - opcua:
+          endpoint: '${OPCUA_ENDPOINT_1:opc.tcp://anlage1:4840}'
+          nodeIDs: [ 'ns=2;s=Maschine' ]
+          subscribeEnabled: true
+          autoReconnect: true
+        processors:
+          - mutation: 'meta machine = "cnc-01"'
+      - opcua:
+          endpoint: '${OPCUA_ENDPOINT_2:opc.tcp://anlage2:4840}'
+          nodeIDs: [ 'ns=2;s=Maschine' ]
+          subscribeEnabled: true
+          autoReconnect: true
+        processors:
+          - mutation: 'meta machine = "cnc-02"'
+
+pipeline:
+  processors:
+    - mapping: |
+        # Quellzeitstempel des Servers; fehlt er oder ist er 0001-01-01, gilt "jetzt".
+        let src_ts = meta("opcua_source_timestamp").or("")
+        root.ts = if $src_ts == "" || $src_ts.has_prefix("0001") { now() } else { $src_ts }
+        root.machine = meta("machine").or(env("MACHINE_NAME").or("unknown"))
+        root.tag = meta("opcua_tag_name").or("unknown")
+
+        # Qualitaet vereinfachen: das Plugin liefert Langtext wie
+        # "The operation succeeded. StatusGood (0x0)". Massgeblich ist der
+        # Statuscode in Klammern, seine obersten zwei Bits geben die
+        # Schwere an (00 Good, 01 Uncertain, 10/11 Bad).
+        # Ergebnis: "Good", "Uncertain 0x40900000", "Bad 0x80340000".
+        let qs = meta("opcua_attr_statuscode").or("")
+        let hexm = $qs.re_find_all_submatch("0x([0-9A-Fa-f]+)")
+        let hex = if $hexm.length() > 0 { $hexm.index(-1).index(1).uppercase() } else { "" }
+        let first = if $hex.length() == 8 { $hex.slice(0, 1) } else { "0" }
+        let sev = if $hex == "" { "" } else if ["0", "1", "2", "3"].contains($first) { "Good" } else if ["4", "5", "6", "7"].contains($first) { "Uncertain" } else { "Bad" }
+        root.quality = if $qs == "" { null } else if $sev == "" { $qs } else if $sev == "Good" { "Good" } else { $sev + " 0x" + $hex }
+
+        # Zahlen und Bool nach value (Bool als 1/0), alles andere als Text.
+        # Hinweis: kein match-Block verwenden, dort zeigt `this` auf den
+        # geprueften Ausdruck statt auf den Messwert.
+        let v = this
+        let t = $v.type()
+        root.value = if $t == "number" { $v } else if $t == "bool" { if $v { 1 } else { 0 } } else { null }
+        root.value_text = if $t == "string" { $v } else if $t == "number" || $t == "bool" || $t == "null" { null } else { $v.string() }
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s

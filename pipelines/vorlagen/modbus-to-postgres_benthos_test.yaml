@@ -1,0 +1,21 @@
+# Unit-Tests fuer das Mapping der Modbus-Vorlage
+tests:
+  - name: Tag-Name aus der Adressliste, Zahl, Bool und Text
+    environment:
+      MACHINE_NAME: kompressor-01
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '21.4'
+        metadata:
+          modbus_tag_name: temperature_c
+          modbus_tag_slaveid: '1'
+      - content: 'false'
+        metadata:
+          modbus_tag_name: running
+      - content: '"SN12345"'
+        metadata:
+          modbus_tag_name: serial_number
+    output_batches:
+      - - bloblang: 'this.machine == "kompressor-01" && this.tag == "temperature_c" && this.value == 21.4 && this.quality == null'
+        - bloblang: 'this.tag == "running" && this.value == 0'
+        - bloblang: 'this.tag == "serial_number" && this.value == null && this.value_text == "SN12345"'

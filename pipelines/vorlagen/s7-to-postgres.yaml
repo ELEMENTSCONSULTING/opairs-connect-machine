@@ -1,0 +1,61 @@
+# Siemens S7 (S7-300/400/1200/1500) -> Postgres
+# Status: Vorlage. Mit lint und Unit-Tests geprueft, noch nicht gegen eine echte Steuerung.
+#
+# Voraussetzungen an der Steuerung (S7-1200/1500, TIA Portal):
+#   - in jedem gelesenen Datenbaustein "Optimierter Bausteinzugriff" ausschalten
+#   - CPU-Eigenschaften > Schutz & Security: "Zugriff ueber PUT/GET erlauben"
+#   - Port 102/TCP vom Connector-Host zur Steuerung offen
+#
+# Anpassen:
+#   - addresses: die zu lesenden Adressen (TIA "DB1.DBD 4" -> "DB1.R4" bzw. "DB1.DI4", Kapitel 4 der Anleitung)
+#   - namen (im Mapping): Adresse -> lesbarer Tag-Name; Punkte der Adresse als "_" schreiben
+#   - connector.env: S7_ADDRESS, S7_RACK, S7_SLOT, S7_INTERVAL; .env: MACHINE_NAME
+#
+# Starten: in .env PIPELINE=/etc/opairs/pipelines/vorlagen/s7-to-postgres.yaml (oder Kopie unter pipelines/)
+
+input:
+  s7comm:
+    tcpDevice: '${S7_ADDRESS:192.168.0.1}'
+    rack: ${S7_RACK:0}
+    slot: ${S7_SLOT:1}
+    timeBetweenReads: '${S7_INTERVAL:1s}'
+    timeout: 10
+    addresses:
+      - 'DB1.X0.0'      # Bool   Anlage laeuft
+      - 'DB1.R4'        # Real   Temperatur
+      - 'DB1.DI8'       # DInt   Stueckzaehler
+      - 'DB1.S12.20'    # String Artikelnummer, max. 20 Zeichen
+
+pipeline:
+  processors:
+    - mapping: |
+        let addr = meta("s7_address").or("")
+        let key = $addr.replace_all(".", "_")
+        # Adresse -> Tag-Name. Nicht aufgefuehrte Adressen behalten ihre Adresse als Namen.
+        let namen = {
+          "DB1_X0_0": "running",
+          "DB1_R4": "temperature_c",
+          "DB1_DI8": "part_counter",
+          "DB1_S12_20": "article"
+        }
+        root.ts = now()
+        root.machine = env("MACHINE_NAME").or("unknown")
+        root.tag = $namen.get($key).or($key.lowercase())
+        root.quality = null   # S7 liefert keine Qualitaet
+
+        # Wert: Zahl und Bool nach value (Bool als 1/0), alles andere als Text.
+        let v = this.catch(content().string())
+        let t = $v.type()
+        root.value = if $t == "number" { $v } else if $t == "bool" { if $v { 1 } else { 0 } } else { null }
+        root.value_text = if $t == "string" { $v } else if $t == "number" || $t == "bool" || $t == "null" { null } else { $v.string() }
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s

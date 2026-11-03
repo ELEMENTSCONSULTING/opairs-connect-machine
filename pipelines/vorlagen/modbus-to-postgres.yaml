@@ -1,0 +1,57 @@
+# Modbus TCP -> Postgres
+# Status: Vorlage. Mit lint und Unit-Tests geprueft, noch nicht gegen ein echtes Geraet.
+#
+# Der Tag-Name kommt direkt aus der Adressliste (erstes Feld von unifiedAddresses).
+# Format: name.register.adresse.typ[:schluessel=wert]*
+#   register: coil | discrete | holding | input
+#   typ:      BIT, INT16, UINT16, INT32, UINT32, INT64, UINT64, FLOAT32, FLOAT64, STRING, ...
+#   Optionen: scale=0.1  bit=3  length=10 (STRING)  slaveID=2  output=FLOAT64
+#
+# Anpassen:
+#   - unifiedAddresses laut Registerliste des Geraeteherstellers (Adressen 0-basiert!)
+#   - byteOrder, falls 32-Bit-Werte unsinnig aussehen (ABCD, DCBA, BADC, CDAB)
+#   - connector.env: MODBUS_ADDRESS, MODBUS_SLAVE_ID, MODBUS_INTERVAL; .env: MACHINE_NAME
+#
+# Starten: in .env PIPELINE=/etc/opairs/pipelines/vorlagen/modbus-to-postgres.yaml
+
+input:
+  modbus:
+    controller: '${MODBUS_ADDRESS:tcp://192.168.0.10:502}'
+    transmissionMode: 'TCP'
+    slaveIDs: [ ${MODBUS_SLAVE_ID:1} ]
+    timeout: '1s'
+    busyRetries: 3
+    busyRetriesWait: '200ms'
+    timeBetweenReads: '${MODBUS_INTERVAL:1s}'
+    byteOrder: 'ABCD'
+    unifiedAddresses:
+      - 'running.coil.0.BIT'
+      - 'temperature_c.holding.100.INT16:scale=0.1'
+      - 'power_kw.holding.200.FLOAT32'
+      - 'serial_number.holding.300.STRING:length=10'
+
+pipeline:
+  processors:
+    - mapping: |
+        root.ts = now()
+        root.machine = env("MACHINE_NAME").or("unknown")
+        # Mehrere Slaves an einem Gateway: z. B. Slave-ID an den Anlagennamen haengen
+        # root.machine = env("MACHINE_NAME").or("unknown") + "-" + meta("modbus_tag_slaveid").or("0")
+        root.tag = meta("modbus_tag_name").or("unknown")
+        root.quality = null   # Modbus liefert keine Qualitaet
+
+        let v = this.catch(content().string())
+        let t = $v.type()
+        root.value = if $t == "number" { $v } else if $t == "bool" { if $v { 1 } else { 0 } } else { null }
+        root.value_text = if $t == "string" { $v } else if $t == "number" || $t == "bool" || $t == "null" { null } else { $v.string() }
+
+output:
+  sql_insert:
+    driver: postgres
+    dsn: '${POSTGRES_DSN}'
+    table: opairs.machine_data
+    columns: [ts, machine, tag, value, value_text, quality]
+    args_mapping: root = [ this.ts, this.machine, this.tag, this.value, this.value_text, this.quality ]
+    batching:
+      count: 500
+      period: 1s

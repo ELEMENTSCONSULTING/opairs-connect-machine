@@ -1,0 +1,19 @@
+# Unit-Tests: Anlagenname kommt aus der jeweiligen Quelle (meta machine)
+tests:
+  - name: Zwei Quellen, je eigener Anlagenname
+    environment:
+      MACHINE_NAME: fallback
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '1200'
+        metadata:
+          machine: cnc-01
+          opcua_tag_name: spindle_speed_rpm
+          opcua_attr_statuscode: 'The operation succeeded. StatusGood (0x0)'
+      - content: '980'
+        metadata:
+          machine: cnc-02
+          opcua_tag_name: spindle_speed_rpm
+    output_batches:
+      - - bloblang: 'this.machine == "cnc-01" && this.tag == "spindle_speed_rpm" && this.value == 1200 && this.quality == "Good"'
+        - bloblang: 'this.machine == "cnc-02" && this.value == 980 && this.quality == null'

@@ -1,0 +1,16 @@
+# Unit-Tests fuer das Mapping der EtherNet/IP-Vorlage
+tests:
+  - name: Alias wird Tag-Name, Array als Text
+    environment:
+      MACHINE_NAME: linie-03
+    target_processors: /pipeline/processors
+    input_batch:
+      - content: '61.25'
+        metadata:
+          eip_tag_name: temperature_c
+      - content: '[1,2,3]'
+        metadata:
+          eip_tag_name: zones
+    output_batches:
+      - - bloblang: 'this.machine == "linie-03" && this.tag == "temperature_c" && this.value == 61.25'
+        - bloblang: 'this.tag == "zones" && this.value == null && this.value_text == "[1,2,3]"'
