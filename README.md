@@ -104,6 +104,12 @@ Die CI laeuft nur, wenn GitHub Actions fuer das Repository aktiviert ist
 | `opairs.machine_data_default` | Sicherheitsnetz, falls eine Tagespartition fehlt (wird bei der Wartung aufgeloest) |
 | `opairs.machine_data_1min` | Minutenwerte (avg/min/max/Anzahl) fuer Dashboards; nur Werte mit guter Qualitaet, `bad_count` zaehlt Uncertain/Bad |
 | `opairs.v_latest_1min` | letzter Minutenwert je Maschine und Tag (letzte 24 h) |
+| `opairs.asset` | Stammdaten je Anlage: Werk, Bereich (Halle), Linie, SAP-Bezeichnungen, Signale fuer OEE |
+| `opairs.tag_meta` | Signalbeschreibung, Einheit, Grenzwerte; `machine = '*'` gilt fuer alle Anlagen |
+| `opairs.state_def` | einheitliche Maschinenzustaende 0-8 und ihre Zeitstufe |
+| `opairs.state_1min` | Zustand, Taktzeit und Qualitaet je Anlage und Minute (aus `aggregate_1min()`) |
+| `opairs.v_oee_1min`, `v_oee_taeglich` | Zeitmodell, OEE, TEEP und Auslastung (siehe unten) |
+| `opairs.v_*_ctx`, `v_anlage`, `v_tag_meta` | Roh- und Minutenwerte mit Einordnung aus den Stammdaten |
 | `opairs.maintain_partitions()`, `aggregate_1min()`, `purge_aggregates()` | Wartungsschritte (siehe unten) |
 | `opairs.run_maintenance()` | alle Wartungsschritte in einem Aufruf |
 
@@ -116,6 +122,59 @@ gespeichert, aber nicht aggregiert.
 `quality` ist `Good`, `Uncertain 0x...` oder `Bad 0x...` (OPC UA) bzw. NULL
 bei Quellen ohne Qualitaetsangabe. Nur `Good` und NULL fliessen in die
 Minutenwerte ein (`opairs.is_good_quality()`).
+
+### Stammdaten, Zustaende und OEE
+
+Anlagen werden nach ISA-95 eingeordnet: Unternehmen > Werk > Bereich (Halle,
+Kostenstelle) > Linie > Anlage > Signal. `opairs.asset.machine` ist der Name,
+den der Connector schreibt. Anlagen ohne Eintrag funktionieren weiter und
+erscheinen in den Sichten als *(nicht zugeordnet)*.
+
+Fuer OEE liefert jede Anlage einen **Zustandscode** (Standard: Signal
+`state_code`), Gruende im Detail als Text (z. B. `status`):
+
+| Code | Zustand | Zeitstufe |
+|---|---|---|
+| 1 | Produktion | Produktion |
+| 2 | Leerlauf / wartet | Leerlauf |
+| 3 | Technische Stoerung | Verfuegbarkeitsverlust |
+| 4 | Ruesten / Produktwechsel (inkl. Reinigung beim Wechsel) | Verfuegbarkeitsverlust, zaehlt zur Auslastung |
+| 5 | Wartung geplant | geplanter Stillstand |
+| 6 | Reinigung geplant | geplanter Stillstand |
+| 7 | Pause / organisatorisch | geplanter Stillstand |
+| 8 | Keine Schicht | keine Schicht |
+| 0 | Unbekannt / kein Signal | nur Kalenderzeit (Datenabdeckung) |
+
+Zeitmodell nach Jodlbauer, je Minute in `opairs.v_oee_1min`:
+Kalenderzeit - keine Schicht = Planbelegungszeit - geplante Stillstaende =
+geplante Betriebszeit - Stoerung und Ruesten = Nettobetriebszeit - Leerlauf
+und Taktverlust (Soll/Ist-Taktzeit) = nutzbare Zeit x Qualitaetsrate =
+Nettoproduktivzeit.
+
+- OEE = Nettoproduktivzeit / Planbelegungszeit (zusaetzlich: OEE ohne geplante Stillstaende)
+- TEEP = Nettoproduktivzeit / Kalenderzeit
+- Auslastung = (Produktion + Ruesten) / geplante Betriebszeit
+
+Der letzte Zustandswert gilt bis zu `asset.zustand_haltezeit` (Standard 15
+Minuten), danach Zustand 0. Quellen, die nur bei Aenderung senden (OPC-UA-
+Subscription), brauchen einen laengeren Wert. Qualitaet (`tag_qualitaet`, 1/0
+je Teil) und Taktzeit (`tag_taktzeit`, Soll aus `tag_taktzeit_soll` oder
+`soll_taktzeit_s`) sind optional, fehlen sie, zaehlt der Faktor 1.
+
+Anlage eintragen (Beispiel):
+
+```sql
+INSERT INTO opairs.asset (machine, bezeichnung, art, werk, bereich, linie,
+                          sap_arbeitsplatz, tag_qualitaet, tag_taktzeit, soll_taktzeit_s)
+VALUES ('presse-01', 'Presse 1', 'Umformen', 'Werk 1000', 'Halle 3', 'Linie 2',
+        'PRS01', 'teil_io', 'taktzeit_s', 12.5);
+```
+
+Die Zustaende einer neuen Anlage werden beim naechsten Wartungslauf ab dem
+ersten Zustandswert (hoechstens 7 Tage) nachgerechnet. Nach Aenderungen an
+den `tag_*`-Spalten die Vergangenheit neu rechnen:
+`SELECT opairs.aggregate_state_1min(interval '30 days', interval '30 days');`
+(nie weiter zurueck als die Rohdaten reichen).
 
 Es gibt bewusst **keine Kompression und keine Continuous Aggregates**
 (TimescaleDB-Community-Funktionen stehen unter der Timescale License). Rohdaten
@@ -226,26 +285,41 @@ Fuer Superset-Tests ohne Maschine: 9 simulierte Anlagen mit Schichtbetrieb,
 Stoerungen, Qualitaetsspitzen und iO/NiO-Pruefungen.
 
 ```bash
-./scripts/demo.sh backfill   # 7 Tage Historie (ca. 3 Mio. Zeilen, unter 1 Minute)
+./scripts/demo.sh backfill   # 7 Tage Historie und Stammdaten (ca. 4 Mio. Zeilen, etwa 1 Minute)
 ./scripts/demo.sh live       # Connector laeuft mit der Demo-Pipeline weiter (Takt 10 s)
-./scripts/demo.sh remove     # alle Demo-Daten loeschen
+./scripts/demo.sh remove     # alle Demo-Daten und Demo-Stammdaten loeschen
 ```
+
+Stammdaten (`sql/demo/demo_stammdaten.sql`): Werk Demo, Halle 1
+Teilefertigung (Linien CNC-Zelle, Spritzguss) und Halle 2 Montage
+(Montagelinie A: mon-01, mon-02; Montagelinie B: mon-03, mon-04).
+
+Zustaende (`state_code`, Grund in `status`):
+
+| Anlage | Zustaende ausser Produktion, Stoerung, keine Schicht |
+|---|---|
+| `demo-cnc-01..03` | 2 wartet auf Material; cnc-02: 5 Wartung Mi 06:00-08:00; cnc-03: 4 Ruesten 13:00-13:20 |
+| `demo-sgm-01` | 2 wartet auf Entnahme |
+| `demo-sgm-02` | 4 Produktwechsel 05:00-05:45, 6 Reinigung Fr 19:00-20:00 |
+| `demo-mon-01..04` | 7 Pause, 2 kein Material; mon-01: 4 Typwechsel 11:00-11:15; mon-02: 6 Reinigung 20:45-21:00; mon-04: 5 Wartung Di 05:00-06:00 |
+
+Im Backfill liefert `demo-cnc-03` am letzten Werktag vor gestern von 10:00
+bis 11:00 keine Daten (Zustand 0 ab 10:14, Datenabdeckung).
 
 Zeiten UTC. Schicht Mo-Fr 05:00-21:00, Spritzguss Mo-Fr durchgehend,
 Montage-Pausen 09:00-09:15 und 13:00-13:30, Stoerungen als 5-Minuten-Bloecke.
 
 | Anlage | Art | Tags |
 |---|---|---|
-| `demo-cnc-01..03` | CNC-Bearbeitung | `state`, `spindle_speed_rpm`, `temperature_c`, `power_kw`, `vibration_mm_s` (Spitzen mit `Uncertain` -> `bad_count`) |
-| `demo-sgm-01` | Spritzguss, Werkzeug `WZ-1001 Gehaeuse 4-fach` | `state`, `status`, `werkzeug`, `kavitaeten`, `zykluszeit_s`, `massetemperatur_c`, `werkzeugtemperatur_c` (Tagesdrift), `einspritzdruck_bar`, `teil_io`, `nio_grund` |
+| `demo-cnc-01..03` | CNC-Bearbeitung | `state`, `state_code`, `status`, `spindle_speed_rpm`, `temperature_c`, `power_kw`, `vibration_mm_s` (Spitzen mit `Uncertain` -> `bad_count`) |
+| `demo-sgm-01` | Spritzguss, Werkzeug `WZ-1001 Gehaeuse 4-fach` | `state`, `state_code`, `status`, `werkzeug`, `kavitaeten`, `zykluszeit_s`, `soll_zykluszeit_s`, `massetemperatur_c`, `werkzeugtemperatur_c` (Tagesdrift), `einspritzdruck_bar`, `teil_io`, `nio_grund` |
 | `demo-sgm-02` | Spritzguss, taeglicher Werkzeugwechsel `WZ-2002 Deckel 2-fach` / `WZ-2003 Clip 8-fach`, Ruesten 05:00-05:45 | wie sgm-01 |
 | `demo-mon-01` | Schraubstation | `schraub_drehmoment_nm` (steigt ueber die Schicht, Bit-Verschleiss), `schraub_drehwinkel_grad` |
 | `demo-mon-02` | Dichtheitspruefung | `pruefdruck_bar`, `leckrate_ccm_min` (NiO > 2.0) |
 | `demo-mon-03` | Einpressstation | `einpresskraft_kn` (iO 7.2-8.8), `einpressweg_mm` (iO 11.85-12.15) |
 | `demo-mon-04` | Endpruefung | `isolationswiderstand_mohm` (NiO < 100), `kamera_io` |
 
-Alle Montagelinien zusaetzlich: `state`, `status` (Produktion/Pause/Stoerung/
-Stillstand), `taktzeit_s`, `pruef_ergebnis` (1 = iO, 0 = NiO; Mittelwert =
+Alle Montagelinien zusaetzlich: `state`, `state_code`, `status`, `taktzeit_s`, `pruef_ergebnis` (1 = iO, 0 = NiO; Mittelwert =
 iO-Quote) und `nio_grund` (Text, nur bei NiO).
 
 Textwerte (`status`, `werkzeug`, `nio_grund`) stehen in `value_text` der
