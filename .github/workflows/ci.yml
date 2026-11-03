@@ -78,7 +78,15 @@ jobs:
           bad=$(docker compose exec -T opairs-connect-db psql -U opairs -d opairs -tAc "SELECT COALESCE(sum(bad_count), 0) FROM opairs.machine_data_1min WHERE machine LIKE 'demo-cnc%'")
           echo "Werte Uncertain (CNC-Vibration): $bad"
           [ "$bad" -gt 100 ] || { echo "::error title=Demo::keine Uncertain-Spitzen in den CNC-Daten ($bad)"; exit 1; }
+          codes=$(docker compose exec -T opairs-connect-db psql -U opairs -d opairs -tAc "SELECT count(DISTINCT state_code) FROM opairs.state_1min WHERE machine LIKE 'demo-%'")
+          echo "Zustandscodes Demo: $codes"
+          [ "$codes" -eq 9 ] || { echo "::error title=Demo::erwartet Zustandscodes 0-8, erhalten $codes"; exit 1; }
+          oee=$(docker compose exec -T opairs-connect-db psql -U opairs -d opairs -tAc "SELECT round((1000 * sum(nettoproduktiv_min) / nullif(sum(planbelegung_min), 0))::numeric) FROM opairs.v_oee_1min WHERE machine LIKE 'demo-%'")
+          echo "OEE Demo (Promille): $oee"
+          [ "${oee:-0}" -gt 500 ] && [ "$oee" -lt 950 ] || { echo "::error title=Demo::OEE unplausibel ($oee Promille)"; exit 1; }
           scripts/ci-run.sh "Demo-Entfernen" ./scripts/demo.sh remove
+          left=$(docker compose exec -T opairs-connect-db psql -U opairs -d opairs -tAc "SELECT (SELECT count(*) FROM opairs.asset WHERE machine LIKE 'demo-%') + (SELECT count(*) FROM opairs.state_1min WHERE machine LIKE 'demo-%')")
+          [ "$left" -eq 0 ] || { echo "::error title=Demo::nach dem Entfernen noch $left Demo-Zeilen"; exit 1; }
 
       - name: Logs bei Fehler
         if: failure()

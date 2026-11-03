@@ -3,17 +3,23 @@
 #
 #   ./scripts/demo.sh live
 #
-#   demo-cnc-01..03   CNC: state, spindle_speed_rpm, temperature_c, power_kw,
-#                     vibration_mm_s (Spitzen mit quality "Uncertain 0x40900000")
-#   demo-sgm-01..02   Spritzguss: state, status, werkzeug, kavitaeten,
-#                     zykluszeit_s, massetemperatur_c, werkzeugtemperatur_c,
+#   demo-cnc-01..03   CNC: state, state_code, status, spindle_speed_rpm,
+#                     temperature_c, power_kw, vibration_mm_s (Spitzen mit
+#                     quality "Uncertain 0x40900000")
+#   demo-sgm-01..02   Spritzguss: state, state_code, status, werkzeug,
+#                     kavitaeten, zykluszeit_s, soll_zykluszeit_s,
+#                     massetemperatur_c, werkzeugtemperatur_c,
 #                     einspritzdruck_bar, teil_io, nio_grund
-#   demo-mon-01..04   Montage: state, status, taktzeit_s, pruef_ergebnis,
-#                     nio_grund und je Linie zwei Messwerte (Schrauber,
-#                     Dichtheit, Einpressen, Endpruefung)
+#   demo-mon-01..04   Montage: state, state_code, status, taktzeit_s,
+#                     pruef_ergebnis, nio_grund und je Linie zwei Messwerte
+#                     (Schrauber, Dichtheit, Einpressen, Endpruefung)
 #
 # Zeiten UTC. Schicht Mo-Fr 05:00-21:00 (Spritzguss Mo-Fr durchgehend),
 # Montage-Pausen 09:00-09:15 und 13:00-13:30, Stoerungen als 5-Minuten-Bloecke.
+# state_code nach opairs.state_def (Plan je Anlage siehe demo_backfill.sql):
+#   1 Produktion, 2 Leerlauf, 3 Stoerung, 4 Ruesten/Produktwechsel,
+#   5 Wartung, 6 Reinigung, 7 Pause, 8 keine Schicht. Grund in "status".
+# Stammdaten (Werk, Halle, Linie, OEE-Signale): sql/demo/demo_stammdaten.sql
 
 input:
   generate:
@@ -22,12 +28,13 @@ input:
 
 pipeline:
   processors:
-    # 0: alle Zeilen eines Takts als Array (feste Anzahl, nio_grund ggf. leer)
+    # 0: alle Zeilen eines Takts als Array (77 Zeilen, nio_grund ggf. leer)
     - mapping: |
         let ts = now()
         let e = $ts.ts_unix()
         let hm = $ts.ts_format("15", "UTC").number() * 60 + $ts.ts_format("04", "UTC").number()
-        let weekday = !["Sat", "Sun"].contains($ts.ts_format("Mon", "UTC"))
+        let dow = {"Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6, "Sun": 7}.get($ts.ts_format("Mon", "UTC"))
+        let weekday = $dow < 6
         let schicht = $weekday && $hm >= 300 && $hm <= 1259
         let pause = ($hm >= 540 && $hm < 555) || ($hm >= 780 && $hm < 810)
         let block = ($e / 300).floor().int64()
@@ -42,11 +49,26 @@ pipeline:
           {"machine": "demo-cnc-02", "seed": 2, "rpm": 6500, "down": 15},
           {"machine": "demo-cnc-03", "seed": 3, "rpm": 9500, "down": 4}
         ].map_each(m -> m.merge({
-          "running": $schicht && (($block * 7919 + m.seed * 104729) % 100) >= m.down,
+          "h": ($block * 7919 + m.seed * 104729) % 100,
           "spike": random_int(max: 9999) < 200
+        })).map_each(m -> m.merge({
+          "code": match {
+            !$schicht => 8,
+            m.machine == "demo-cnc-02" && $dow == 3 && $hm >= 360 && $hm < 480 => 5,
+            m.machine == "demo-cnc-03" && $hm >= 780 && $hm < 800 => 4,
+            m.h < m.down => 3,
+            m.h < m.down + 5 => 2,
+            _ => 1
+          }
+        })).map_each(m -> m.merge({
+          "running": m.code == 1
         }))
         let cnc_rows = $cnc.map_each(m -> [
           {"machine": m.machine, "tag": "state", "value": if m.running { 1 } else { 0 }},
+          {"machine": m.machine, "tag": "state_code", "value": m.code},
+          {"machine": m.machine, "tag": "status", "value_text": match m.code {
+            8 => "Keine Schicht", 5 => "Wartung geplant", 4 => "Ruesten Auftragswechsel",
+            3 => "Stoerung", 2 => "Wartet auf Material", _ => "Produktion" }},
           {"machine": m.machine, "tag": "spindle_speed_rpm", "value": if m.running { (m.rpm * (0.95 + random_int(max: 100) / 1000.0)).round() } else { 0 }},
           {"machine": m.machine, "tag": "temperature_c", "value": if m.running { 45 + 10 * $tri20 + random_int(max: 200) / 100.0 } else { 26 + random_int(max: 200) / 100.0 }},
           {"machine": m.machine, "tag": "power_kw", "value": if m.running { 7.5 * m.rpm / 8000.0 + random_int(max: 300) / 100.0 } else { 0.6 + random_int(max: 30) / 100.0 }},
@@ -57,21 +79,29 @@ pipeline:
 
         # ---------------- Spritzguss ----------------
         let sgm2 = if $day % 2 == 0 {
-          {"machine": "demo-sgm-02", "seed": 5, "down": 10, "werkzeug": "WZ-2002 Deckel 2-fach", "kav": 2, "zyklus": 22, "drift": 0}
+          {"machine": "demo-sgm-02", "seed": 5, "down": 10, "werkzeug": "WZ-2002 Deckel 2-fach", "kav": 2, "zyklus": 22, "soll": 21, "drift": 0}
         } else {
-          {"machine": "demo-sgm-02", "seed": 5, "down": 10, "werkzeug": "WZ-2003 Clip 8-fach", "kav": 8, "zyklus": 16, "drift": 0}
+          {"machine": "demo-sgm-02", "seed": 5, "down": 10, "werkzeug": "WZ-2003 Clip 8-fach", "kav": 8, "zyklus": 16, "soll": 15.5, "drift": 0}
         }
         let sgm = [
-          {"machine": "demo-sgm-01", "seed": 4, "down": 5, "werkzeug": "WZ-1001 Gehaeuse 4-fach", "kav": 4, "zyklus": 28, "drift": 4},
+          {"machine": "demo-sgm-01", "seed": 4, "down": 5, "werkzeug": "WZ-1001 Gehaeuse 4-fach", "kav": 4, "zyklus": 28, "soll": 27, "drift": 4},
           $sgm2
         ].map_each(m -> m.merge({
-          "ruesten": $weekday && m.machine == "demo-sgm-02" && $hm >= 300 && $hm <= 344,
-          "stoerung": (($block * 7919 + m.seed * 104729) % 100) < m.down,
+          "h": ($block * 7919 + m.seed * 104729) % 100,
           "druckspitze": random_int(max: 9999) < 200,
           "grat": random_int(max: 9999) < 100,
           "u": random_int(max: 2000) / 1000.0 - 1
         })).map_each(m -> m.merge({
-          "running": $weekday && !m.ruesten && !m.stoerung,
+          "code": match {
+            !$weekday => 8,
+            m.machine == "demo-sgm-02" && $hm >= 300 && $hm <= 344 => 4,
+            m.machine == "demo-sgm-02" && $dow == 5 && $hm >= 1140 && $hm < 1200 => 6,
+            m.h < m.down => 3,
+            m.machine == "demo-sgm-01" && m.h < m.down + 3 => 2,
+            _ => 1
+          }
+        })).map_each(m -> m.merge({
+          "running": m.code == 1,
           "o": if m.druckspitze { 120 } else { 0 }
         })).map_each(m -> m.merge({
           "druck": 850 + 25 * m.u + m.o
@@ -85,10 +115,14 @@ pipeline:
         }))
         let sgm_rows = $sgm.map_each(m -> [
           {"machine": m.machine, "tag": "state", "value": if m.running { 1 } else { 0 }},
-          {"machine": m.machine, "tag": "status", "value_text": if !$weekday { "Stillstand" } else if m.ruesten { "Ruesten" } else if m.stoerung { "Stoerung" } else { "Produktion" }},
+          {"machine": m.machine, "tag": "state_code", "value": m.code},
+          {"machine": m.machine, "tag": "status", "value_text": match m.code {
+            8 => "Keine Schicht", 4 => "Werkzeugwechsel", 6 => "Reinigung",
+            3 => "Stoerung", 2 => "Wartet auf Entnahme", _ => "Produktion" }},
           {"machine": m.machine, "tag": "werkzeug", "value_text": m.werkzeug},
           {"machine": m.machine, "tag": "kavitaeten", "value": m.kav},
           {"machine": m.machine, "tag": "zykluszeit_s", "value": if m.running { m.zyklus * (1 + 0.01 * (random_int(max: 2000) / 1000.0 - 1)) } else { null }},
+          {"machine": m.machine, "tag": "soll_zykluszeit_s", "value": m.soll},
           {"machine": m.machine, "tag": "massetemperatur_c", "value": if m.running { 230 + 3 * (random_int(max: 2000) / 1000.0 - 1) } else if $weekday { 220 + 2 * (random_int(max: 2000) / 1000.0 - 1) } else { 40 + 2 * (random_int(max: 2000) / 1000.0 - 1) }},
           {"machine": m.machine, "tag": "werkzeugtemperatur_c", "value": if m.running { 60 + 1.5 * (random_int(max: 2000) / 1000.0 - 1) + m.drift * $triday } else if $weekday { 50 + (random_int(max: 2000) / 1000.0 - 1) } else { 25 + (random_int(max: 2000) / 1000.0 - 1) }},
           {"machine": m.machine, "tag": "einspritzdruck_bar", "value": if m.running { m.druck.round() } else { null }},
@@ -109,7 +143,7 @@ pipeline:
           {"machine": "demo-mon-04", "seed": 9, "down": 8, "takt": 30, "tag1": "isolationswiderstand_mohm", "tag2": "kamera_io",
            "base1": 500, "sc1": 80, "drift1": 0, "p1": 0.01, "d1": 0, "base2": 1, "sc2": 0, "p2": 0.02, "d2a": 0, "d2b": 0}
         ].map_each(m -> m.merge({
-          "stoerung": (($block * 7919 + m.seed * 104729) % 100) < m.down,
+          "h": ($block * 7919 + m.seed * 104729) % 100,
           "u1": random_int(max: 2000) / 1000.0 - 1,
           "u2": random_int(max: 2000) / 1000.0 - 1,
           "u3": random_int(max: 2000) / 1000.0 - 1,
@@ -117,7 +151,18 @@ pipeline:
           "s2": random_int(max: 9999) / 10000.0,
           "s3": random_int(max: 9999) / 10000.0
         })).map_each(m -> m.merge({
-          "running": $schicht && !$pause && !m.stoerung,
+          "code": match {
+            !$schicht => 8,
+            $pause => 7,
+            m.machine == "demo-mon-02" && $hm >= 1245 && $hm < 1260 => 6,
+            m.machine == "demo-mon-04" && $dow == 2 && $hm >= 300 && $hm < 360 => 5,
+            m.machine == "demo-mon-01" && $hm >= 660 && $hm < 675 => 4,
+            m.h < m.down => 3,
+            m.h < m.down + 5 => 2,
+            _ => 1
+          }
+        })).map_each(m -> m.merge({
+          "running": m.code == 1,
           "o1": if m.s1 < m.p1 { m.d1 } else { 0 },
           "o2": if m.s2 < m.p2 { m.d2a + m.d2b * m.s3 } else { 0 }
         })).map_each(m -> m.merge({
@@ -142,7 +187,10 @@ pipeline:
         }))
         let mon_rows = $mon.map_each(m -> [
           {"machine": m.machine, "tag": "state", "value": if m.running { 1 } else { 0 }},
-          {"machine": m.machine, "tag": "status", "value_text": if !$schicht { "Stillstand" } else if $pause { "Pause" } else if m.stoerung { "Stoerung" } else { "Produktion" }},
+          {"machine": m.machine, "tag": "state_code", "value": m.code},
+          {"machine": m.machine, "tag": "status", "value_text": match m.code {
+            8 => "Keine Schicht", 7 => "Pause", 6 => "Reinigung Pruefkammer", 5 => "Wartung Kamera",
+            4 => "Typwechsel", 3 => "Stoerung", 2 => "Kein Material", _ => "Produktion" }},
           {"machine": m.machine, "tag": "taktzeit_s", "value": if m.running { m.takt * (1 + 0.03 * m.u3) } else { null }},
           {"machine": m.machine, "tag": "pruef_ergebnis", "value": if !m.running { null } else if m.nio == null { 1 } else { 0 }},
           {"machine": m.machine, "tag": m.tag1, "value": if m.running { m.m1 } else { null }},

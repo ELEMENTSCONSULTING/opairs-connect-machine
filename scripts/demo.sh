@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Demo-Daten fuer Superset.
 #
-#   ./scripts/demo.sh backfill   7 Tage Historie fuer 9 Demo-Anlagen erzeugen
+#   ./scripts/demo.sh backfill   7 Tage Historie und Stammdaten fuer 9 Demo-Anlagen erzeugen
 #   ./scripts/demo.sh live       Connector auf die Demo-Pipeline umstellen (laeuft weiter)
-#   ./scripts/demo.sh remove     alle Demo-Daten loeschen
+#   ./scripts/demo.sh remove     alle Demo-Daten und Demo-Stammdaten loeschen
 #
 # "live" aendert PIPELINE in .env. Zurueck auf eine echte Quelle: PIPELINE in
 # .env setzen und "docker compose up -d && docker compose restart connector".
@@ -28,6 +28,7 @@ case "${1:-}" in
             echo 'PIPELINE=/etc/opairs/pipelines/demo-anlage.yaml' >> .env
         fi
         docker compose up -d
+        psql_file /docker-entrypoint-initdb.d/demo/demo_stammdaten.sql
         docker compose restart connector
         echo "Demo-Pipeline laeuft (9 Anlagen, Takt 10 s)."
         ;;

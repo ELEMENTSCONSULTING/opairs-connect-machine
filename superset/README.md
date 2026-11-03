@@ -4,13 +4,19 @@
 "Dashboards -> Export") mit:
 
 - Datenbankverbindung **OPAIRS Connect** (`opairs_reader@opairs-connect-db:5432/opairs`)
-- 3 virtuelle Datasets mit eigenen Namen, damit sie nicht mit selbst
+- 5 virtuelle Datasets mit eigenen Namen, damit sie nicht mit selbst
   angelegten Datasets auf dieselben Tabellen kollidieren:
-  - `opairs_connect_minutenwerte` (`SELECT * FROM opairs.machine_data_1min`)
-  - `opairs_connect_aktueller_stand` (`SELECT * FROM opairs.v_latest_1min`)
-  - `opairs_connect_rohdaten` (`SELECT * FROM opairs.machine_data`)
-- 28 Charts in 5 Tabs: Uebersicht, CNC, Spritzguss, Montage, Rohdaten
-- Filter: Zeitraum (Standard: letzte Woche), Anlage. Aktualisierung jede Minute.
+  - `opairs_connect_minutenwerte` (`SELECT * FROM opairs.v_machine_data_1min_ctx`)
+  - `opairs_connect_aktueller_stand` (`SELECT * FROM opairs.v_latest_1min_ctx`)
+  - `opairs_connect_rohdaten` (`SELECT * FROM opairs.v_machine_data_ctx`)
+  - `opairs_connect_zeitmodell` (`SELECT * FROM opairs.v_oee_1min`)
+  - `opairs_connect_anlagen` (`SELECT * FROM opairs.v_anlage`, Quelle der Filter)
+- 38 Charts in 6 Tabs: Uebersicht, Kennzahlen, CNC, Spritzguss, Montage, Rohdaten
+- Filter: Zeitraum (Standard: letzte Woche), Werk -> Bereich (Halle) -> Linie
+  -> Anlage (jeweils nur Werte des darueber gewaehlten). Aktualisierung jede Minute.
+
+Voraussetzung: Datenbankschema mit Stammdaten und Zustaenden (`sql/001_schema.sql`
+ab dieser Fassung; die Wartung spielt es beim Start ein).
 
 Getestet mit Apache Superset 6.1, lokal gegen die Demo-Daten und auf
 opairs-node-001 im Betrieb.
@@ -54,7 +60,7 @@ Superset ueberschreibt beim Dashboard-Import nur das Dashboard selbst,
 
 1. Dashboards: *OPAIRS Connect* loeschen
 2. Charts: alle Charts mit `[OPAIRS Connect]` im Namen loeschen ("Bulk select")
-3. Datasets: die drei `opairs_connect_*`-Datasets loeschen
+3. Datasets: alle `opairs_connect_*`-Datasets loeschen
 4. ZIP wie oben importieren. Die Datenbankverbindung bleibt bestehen.
 
 ## Anpassen
@@ -82,9 +88,17 @@ erhalten, bis die ZIP erneut importiert wird.
 | Werte mit Qualitaetsproblem | `SUM(bad_count)`: Werte mit Qualitaet Uncertain oder Bad. Sie stehen in den Rohdaten und fehlen in Mittel, Min und Max |
 | Anlagen mit Daten | Anlagen mit mindestens einem Rohwert in den letzten 5 Minuten |
 | Verlaeufe | `AVG(avg_value)`, bei Grenzwert-Signalen `MAX(max_value)` bzw. `MIN(min_value)` |
+| OEE | `SUM(nettoproduktiv_min) / SUM(planbelegung_min)` |
+| OEE ohne geplante Stillstaende | `SUM(nettoproduktiv_min) / SUM(geplante_betriebszeit_min)` |
+| TEEP | `SUM(nettoproduktiv_min) / SUM(kalender_min)` |
+| Auslastung | `SUM(auslastung_min) / SUM(geplante_betriebszeit_min)` (Produktion + Ruesten) |
+| Verfuegbarkeit, Leistung, Qualitaet | Nettobetriebszeit / geplante Betriebszeit, nutzbare Zeit / Nettobetriebszeit, Nettoproduktivzeit / nutzbare Zeit |
+| Datenabdeckung | Anteil der Minuten mit gueltigem Zustand (nicht 0) |
 
-Der Bereich (CNC, Spritzguss, Montage) im Chart "Laufzeitanteil im Verlauf"
-ergibt sich aus dem Anlagennamen (`cnc`, `sgm`, `mon`). Die Charts filtern nach
+Kennzahlen je Linie, Bereich oder Werk summieren die Minuten aller Anlagen
+(zeitgewichtet), sie bilden keinen Engpass einer verketteten Linie ab.
+
+Die Anlagenart im Chart "Laufzeitanteil im Verlauf" kommt aus `opairs.asset.art`. Die Charts filtern nach
 Signalnamen (`tag`), nicht nach Anlagen. Echte Anlagen mit denselben
 Signalnamen erscheinen deshalb automatisch.
 
