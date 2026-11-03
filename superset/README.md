@@ -53,6 +53,31 @@ python3 superset/build_dashboard.py \
   --database-uuid <uuid> --database-name "<name>" --out /tmp/OPAIRS_Connect_Dashboard.zip
 ```
 
+## Query-Kontext setzen (nach jedem Import)
+
+Importierte Charts haben keinen gespeicherten Query-Kontext. Superset zeigt sie
+im Dashboard trotzdem an, aber ueber die API (`/api/v1/chart/<id>/data`,
+genutzt vom OPAIRS Connect Assistenten sowie von Alerts & Reports) kommen
+keine Daten. Nach dem Import einmal ausfuehren (nur Python-Standardbibliothek,
+laeuft auf jedem Rechner, der Superset erreicht):
+
+```bash
+SUPERSET_PASSWORD='…' python3 superset/set_query_context.py \
+  --url http://localhost:8088 --user admin --dashboard "OPAIRS Connect"
+```
+
+Das Skript baut den Kontext aus den gespeicherten Chart-Parametern, prueft
+ihn mit einer Testabfrage (`/api/v1/chart/data`) und speichert ihn nur, wenn
+sie fehlerfrei laeuft. `--dry-run` prueft nur, `--force` setzt auch Charts
+neu, die schon einen Kontext haben. Erwartung: "38 gesetzt, 0 fehlgeschlagen",
+bei einem zweiten Lauf "38 uebersprungen". Fehlgeschlagene Charts bleiben
+unveraendert; einmal in Superset oeffnen und speichern legt den Kontext dann
+von Hand an.
+
+Das Kennwort steht nur in der Umgebungsvariable, nicht in der Befehlszeile.
+Mit einem Leerzeichen vor dem Befehl landet es bei Bash (Standard-Einstellung
+`HISTCONTROL=ignoreboth`) auch nicht in der History.
+
 ## Update auf eine neue Fassung
 
 Superset ueberschreibt beim Dashboard-Import nur das Dashboard selbst,
@@ -62,6 +87,7 @@ Superset ueberschreibt beim Dashboard-Import nur das Dashboard selbst,
 2. Charts: alle Charts mit `[OPAIRS Connect]` im Namen loeschen ("Bulk select")
 3. Datasets: alle `opairs_connect_*`-Datasets loeschen
 4. ZIP wie oben importieren. Die Datenbankverbindung bleibt bestehen.
+5. Query-Kontext setzen (Abschnitt oben), die neuen Charts haben neue IDs.
 
 ## Anpassen
 
