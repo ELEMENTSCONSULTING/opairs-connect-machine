@@ -608,6 +608,8 @@ def build(db_uuid, db_name, uri, out, check=False):
         return
     pathlib.Path(out).write_bytes(buf.getvalue())
     print(f"{out}: {len(CHARTS)} Charts, {len(DATASETS)} Datasets, Verbindung {db_name!r} ({db_uuid})")
+    print("Nach dem Import: python3 superset/set_query_context.py --url <superset> --user <admin> "
+          "ausfuehren (Query-Kontext fuer die API, Kennwort in SUPERSET_PASSWORD)")
 
 
 if __name__ == "__main__":
