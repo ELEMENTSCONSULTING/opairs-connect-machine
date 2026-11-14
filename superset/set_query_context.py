@@ -19,10 +19,19 @@ import urllib.error
 import urllib.request
 
 
+class _InternalHttpPolicy(http.cookiejar.DefaultCookiePolicy):
+    """Session-Cookie mit Secure (SESSION_COOKIE_SECURE) auch zuruecksenden, wenn Superset
+    intern per http:// angesprochen wird (z. B. http://superset:8088 hinter einem
+    TLS-Proxy). Sonst fehlt die Session beim CSRF-Check und jedes PUT scheitert mit 400."""
+    def return_ok_secure(self, cookie, request):
+        return True
+
+
 class Superset:
     def __init__(self, url: str, user: str, password: str):
         self.url = url.rstrip("/")
-        self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        self.op = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar(policy=_InternalHttpPolicy())))
         self.h: dict = {}
         tok = self.req(
             "POST", "/api/v1/security/login",
